@@ -384,7 +384,7 @@ permanently block the remote console:
 
 ```
 dofile("/lib/job.lua").request("mine_vertical", {
-  legLength = 10, descend = 2, minFuel = 500, columnDX = -1, columnDZ = 1,
+  legLength = 10, descend = 2, minFuel = 500, columnDX = -1, columnDY = 1,
 })
 dofile("/lib/job.lua").stop()
 ```
@@ -394,10 +394,13 @@ dofile("/lib/job.lua").stop()
 - `minFuel` (default 500): stops before starting a new column if fuel
   can't be brought above this.
 - `columnDX` (default -1): x shift applied to each new column, relative
-  to the previous one.
-- `columnDZ` (default 1): magnitude of the z shift each new column; sign
-  alternates every column (so the grid zigzags in z while marching
-  steadily in x, rather than spreading across a full 2D area).
+  to the previous one. z never changes.
+- `columnDY` (default 1): magnitude of the *starting height* shift each
+  new column; sign alternates every column, so columns march steadily in
+  x at a fixed z, staggered up/down by 1 around the original height
+  rather than all starting at the same y. That stagger means adjacent
+  columns' horizontal legs land at different depths instead of
+  perfectly overlapping, exposing more distinct rock per block dug.
 
 The return trip up a column deliberately does **not** use
 `pathfind.goto()`: a column is a narrow, arbitrarily-shaped zigzag

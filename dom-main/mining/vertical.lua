@@ -12,9 +12,13 @@
   When a column bottoms out (can't dig down any further -- bedrock, the
   normal end of a column) or a leg is blocked immediately (a side wall,
   not the bottom), it retraces its own dig log back up to that column's
-  top, shifts to a new column (x -= columnDX every time; z +=
-  columnDZ, alternating sign each time), and starts again -- forever,
-  until told to stop.
+  top, shifts to a new column -- x += columnDX every time; the column's
+  *starting height* (y) shifts by columnDY, alternating sign each time,
+  while z stays fixed -- and starts again, forever, until told to stop.
+  Staggering each column's start height rather than starting every column
+  at the same y means adjacent columns' horizontal legs land at
+  different depths instead of perfectly overlapping, exposing more
+  distinct rock per block dug.
 
   Meant to run as a lib/job.lua job (see main.lua), not called directly:
   a run long enough to be worth calling "forever" would otherwise block
@@ -50,7 +54,7 @@ local DEFAULTS = {
   descend   = 2,   -- blocks descended before each leg
   minFuel   = 500, -- abort before starting a new column if fuel can't be brought above this
   columnDX  = -1,  -- x shift applied to each new column, relative to the previous one
-  columnDZ  = 1,   -- magnitude of z shift each new column; sign alternates every column
+  columnDY  = 1,   -- magnitude of the start-height shift each new column; sign alternates every column
 }
 
 -- Bounds dig retries -- see dom-main/mining/strip.lua for why this can't
@@ -133,7 +137,7 @@ local function returnToColumnStart(legs)
 end
 
 -- Job entry point (see lib/job.lua): params is { legLength, descend,
--- minFuel, columnDX, columnDZ }, all optional (see DEFAULTS). Marks home
+-- minFuel, columnDX, columnDY }, all optional (see DEFAULTS). Marks home
 -- (lib/home.lua) if nothing's marked yet, so the very first column's top
 -- is remembered even across a mid-run reboot -- each subsequent column's
 -- own top is just tracked locally, since home.lua only remembers one
@@ -144,12 +148,12 @@ function M.run(params, shouldStop)
   local descend   = params.descend or DEFAULTS.descend
   local minFuel   = params.minFuel or DEFAULTS.minFuel
   local columnDX  = params.columnDX or DEFAULTS.columnDX
-  local columnDZ  = params.columnDZ or DEFAULTS.columnDZ
+  local columnDY  = params.columnDY or DEFAULTS.columnDY
 
   if not home.get() then home.mark() end
 
   local columnStart = nav.getPosition()
-  local dzSign = 1
+  local dySign = 1
   local columnIndex = 0
 
   while not (shouldStop and shouldStop()) do
@@ -176,12 +180,12 @@ function M.run(params, shouldStop)
       return true, { columns = columnIndex, position = nav.getPosition() }
     end
 
-    dzSign = -dzSign
+    dySign = -dySign
     local nextX = columnStart.x + columnDX
-    local nextZ = columnStart.z + (columnDZ * dzSign)
-    print(("vertical: moving to column %d at (%d, %d, %d)"):format(columnIndex + 1, nextX, columnStart.y, nextZ))
+    local nextY = columnStart.y + (columnDY * dySign)
+    print(("vertical: moving to column %d at (%d, %d, %d)"):format(columnIndex + 1, nextX, nextY, columnStart.z))
 
-    local reached, info = pathfind.goto(nextX, columnStart.y, nextZ, { tolerance = 0, allowDig = true })
+    local reached, info = pathfind.goto(nextX, nextY, columnStart.z, { tolerance = 0, allowDig = true })
     if not reached then
       print("vertical: could not reach next column -- " .. tostring(info.reason))
       return false, "could not reach next column: " .. tostring(info.reason)
