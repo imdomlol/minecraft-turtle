@@ -10,6 +10,23 @@ Usage:
   turtlectl.py watch <id>
   turtlectl.py console <id>   -- live screen feed; type a command + enter to send it
 
+Shortcuts for common turtle-side calls, so you don't have to remember
+which lib/*.lua file or function each one is, or which are background
+jobs vs plain calls -- these build the right dofile(...) command for you:
+  turtlectl.py goto <id> <x> <y> <z> [--tolerance N] [--dig]
+  turtlectl.py mine <id> [--leg N] [--descend N] [--min-fuel N] [--column-dz N] [--column-dy N]
+  turtlectl.py stop <id>              -- stop the running job, back to idle
+  turtlectl.py jobstatus <id>
+  turtlectl.py pos <id>
+  turtlectl.py inv <id>
+  turtlectl.py home <id> [--dig]      -- go to the marked home position
+  turtlectl.py markhome <id>          -- mark the current position as home
+  turtlectl.py findchest <id> [--x N --y N --z N] [--radius N]
+
+All of the above accept --wait (and --wait-timeout, default 120s) to
+block and print the result once it completes, instead of just queuing
+it -- handy for a quick check without a separate `results`/`console` look.
+
 Reads RELAY_URL and RELAY_TOKEN from the environment; --url/--token override.
 """
 import argparse
@@ -51,6 +68,36 @@ def print_result(r):
     print(f"[{status}] {r.get('command')}\n{r.get('output')}\n")
 
 
+def wait_for_result(url, token, tid, cmd_id, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        results = request(f"{url}/results?id={tid}", token)
+        for r in results:
+            if r.get("cmd_id") == cmd_id:
+                return r
+        time.sleep(2)
+    return None
+
+
+def queue(url, args, description, command):
+    """Queues `command` for args.id, prints a one-line confirmation, and --
+    if args.wait is set -- blocks for the result and prints it too."""
+    res = request(f"{url}/cmd?id={args.id}", args.token, "POST", {"command": command})
+    print(f"queued {res['cmd_id']} on turtle {args.id}: {description}")
+    if getattr(args, "wait", False):
+        print("waiting for result...")
+        r = wait_for_result(url, args.token, args.id, res["cmd_id"], args.wait_timeout)
+        if r:
+            print_result(r)
+        else:
+            print(f"(no result after {args.wait_timeout}s -- it may still be running; "
+                  f"check with `results {args.id}` or `console {args.id}`)")
+
+
+def lua_bool(b):
+    return "true" if b else "false"
+
+
 def main():
     p = argparse.ArgumentParser(description="Operator CLI for the turtle relay.")
     p.add_argument("--url", default=os.environ.get("RELAY_URL", "http://localhost:8787"))
@@ -75,6 +122,55 @@ def main():
 
     cp = sub.add_parser("console")
     cp.add_argument("id")
+
+    # Shortcuts below all accept --wait/--wait-timeout via this shared parent.
+    waitp = argparse.ArgumentParser(add_help=False)
+    waitp.add_argument("--wait", action="store_true",
+                        help="Block and print the result once it completes.")
+    waitp.add_argument("--wait-timeout", type=int, default=120,
+                        help="Seconds to wait with --wait (default 120).")
+
+    gp = sub.add_parser("goto", parents=[waitp], help="Move to (x, y, z) as a background job.")
+    gp.add_argument("id")
+    gp.add_argument("x", type=int)
+    gp.add_argument("y", type=int)
+    gp.add_argument("z", type=int)
+    gp.add_argument("--tolerance", type=int, default=0)
+    gp.add_argument("--dig", action="store_true", help="Dig/attack through obstacles.")
+
+    mp = sub.add_parser("mine", parents=[waitp], help="Start the vertical strip miner.")
+    mp.add_argument("id")
+    mp.add_argument("--leg", type=int, help="Blocks per forward/backward leg (default 10).")
+    mp.add_argument("--descend", type=int, help="Blocks descended before each leg (default 3).")
+    mp.add_argument("--min-fuel", type=int, help="Stop before a new column below this fuel (default 500).")
+    mp.add_argument("--column-dz", type=int, help="Z shift per new column (default 1).")
+    mp.add_argument("--column-dy", type=int, help="Start-height shift per new column (default 1).")
+
+    stp = sub.add_parser("stop", parents=[waitp], help="Stop the running job (back to idle).")
+    stp.add_argument("id")
+
+    jsp = sub.add_parser("jobstatus", parents=[waitp], help="What job is running / queued.")
+    jsp.add_argument("id")
+
+    pp = sub.add_parser("pos", parents=[waitp], help="Report position and surroundings.")
+    pp.add_argument("id")
+
+    ip = sub.add_parser("inv", parents=[waitp], help="Report inventory contents.")
+    ip.add_argument("id")
+
+    hp = sub.add_parser("home", parents=[waitp], help="Go to the marked home position.")
+    hp.add_argument("id")
+    hp.add_argument("--dig", action="store_true", help="Dig/attack through obstacles.")
+
+    mhp = sub.add_parser("markhome", parents=[waitp], help="Mark the current position as home.")
+    mhp.add_argument("id")
+
+    fcp = sub.add_parser("findchest", parents=[waitp], help="Search for a nearby chest.")
+    fcp.add_argument("id")
+    fcp.add_argument("--x", type=int, help="Search center (default: home position).")
+    fcp.add_argument("--y", type=int)
+    fcp.add_argument("--z", type=int)
+    fcp.add_argument("--radius", type=int, default=8)
 
     args = p.parse_args()
     if not args.token:
@@ -174,6 +270,52 @@ def main():
             pass
         finally:
             stop.set()
+
+    elif args.cmd == "goto":
+        command = (
+            'dofile("/lib/job.lua").request("goto", { '
+            f'x = {args.x}, y = {args.y}, z = {args.z}, '
+            f'tolerance = {args.tolerance}, allowDig = {lua_bool(args.dig)} }})'
+        )
+        queue(url, args, f"goto ({args.x}, {args.y}, {args.z}) tolerance={args.tolerance} dig={args.dig}", command)
+
+    elif args.cmd == "mine":
+        fields = []
+        if args.leg is not None: fields.append(f"legLength = {args.leg}")
+        if args.descend is not None: fields.append(f"descend = {args.descend}")
+        if args.min_fuel is not None: fields.append(f"minFuel = {args.min_fuel}")
+        if args.column_dz is not None: fields.append(f"columnDZ = {args.column_dz}")
+        if args.column_dy is not None: fields.append(f"columnDY = {args.column_dy}")
+        params = "{ " + ", ".join(fields) + " }"
+        command = f'dofile("/lib/job.lua").request("mine_vertical", {params})'
+        queue(url, args, f"mine_vertical {params}", command)
+
+    elif args.cmd == "stop":
+        queue(url, args, "stop current job", 'dofile("/lib/job.lua").stop()')
+
+    elif args.cmd == "jobstatus":
+        queue(url, args, "job status", 'return dofile("/lib/job.lua").status()')
+
+    elif args.cmd == "pos":
+        queue(url, args, "position report", 'return dofile("/lib/nav.lua").report()')
+
+    elif args.cmd == "inv":
+        queue(url, args, "inventory report", 'return dofile("/lib/inventory.lua").report()')
+
+    elif args.cmd == "home":
+        command = f'return dofile("/lib/home.lua").go({{ allowDig = {lua_bool(args.dig)} }})'
+        queue(url, args, f"go home dig={args.dig}", command)
+
+    elif args.cmd == "markhome":
+        queue(url, args, "mark current position as home", 'return dofile("/lib/home.lua").mark()')
+
+    elif args.cmd == "findchest":
+        fields = [f"maxRadius = {args.radius}"]
+        if args.x is not None and args.y is not None and args.z is not None:
+            fields += [f"x = {args.x}", f"y = {args.y}", f"z = {args.z}"]
+        params = "{ " + ", ".join(fields) + " }"
+        command = f'return dofile("/lib/chestfinder.lua").find({params})'
+        queue(url, args, f"find chest {params}", command)
 
 
 if __name__ == "__main__":

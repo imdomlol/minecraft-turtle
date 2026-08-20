@@ -208,6 +208,31 @@ long-running (a `pathfind.goto()` across a big distance, say), which
 would otherwise leave the console looking dead for the entire duration
 before dumping everything at once at the end.
 
+### Shortcuts for common calls
+
+Typing out `dofile("/lib/job.lua").request("goto", { x = -89, y = 55, z
+= -87, allowDig = true })` from memory is a lot to ask — and it's easy to
+forget which lib/*.lua file a call lives in, or whether it's a background
+job (`request`/`stop`) versus a plain call. `turtlectl.py` has shortcuts
+that build the right command for you:
+
+```
+python3 server/turtlectl.py goto Lux -89 55 -87 --dig       # background job, cancellable
+python3 server/turtlectl.py mine Lux --leg 12 --descend 4   # any omitted flag keeps its default
+python3 server/turtlectl.py stop Lux                        # stop the running job, back to idle
+python3 server/turtlectl.py jobstatus Lux
+python3 server/turtlectl.py pos Lux
+python3 server/turtlectl.py inv Lux
+python3 server/turtlectl.py home Lux --dig
+python3 server/turtlectl.py markhome Lux
+python3 server/turtlectl.py findchest Lux --radius 12        # or --x/--y/--z to search elsewhere
+```
+
+Every shortcut above also takes `--wait` (block and print the result once
+it completes — no separate `results`/`console` lookup for a quick check)
+and `--wait-timeout` (seconds, default 120). `--help` on any of them
+lists its flags, e.g. `turtlectl.py goto --help`.
+
 ## lib/identity.lua
 
 Assigns each turtle a stable name to identify itself to the relay with —
