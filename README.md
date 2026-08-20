@@ -374,8 +374,11 @@ instead of a horizontal shaft: descend, dig a leg, turn 180°, repeat —
 since a descend happens before every leg and legs alternate direction,
 leg N and leg N+2 land on the same footprint one level apart, covering a
 `legLength * 2`-wide vertical slice as it goes. When a column bottoms out
-(bedrock) or a leg is blocked immediately (a side wall), it retraces back
-up to that column's top, shifts to a new column, and starts again —
+(bedrock) or a leg is blocked immediately (a side wall), it gets back
+under the column's own start (x, z) at the current depth — digging
+through anything in the way, since most of that path is already opened
+up by the zigzag's own legs crossing through it — then digs straight up
+to the start's y. It then shifts to a new column, and starts again —
 forever, until told to stop.
 
 Registered as a job (`mine_vertical`, see `lib/job.lua` above) rather
@@ -384,13 +387,13 @@ permanently block the remote console:
 
 ```
 dofile("/lib/job.lua").request("mine_vertical", {
-  legLength = 10, descend = 2, minFuel = 500, columnDX = -1, columnDY = 1,
+  legLength = 10, descend = 3, minFuel = 500, columnDX = -1, columnDY = 1,
 })
 dofile("/lib/job.lua").stop()
 ```
 
 - `legLength` (default 10): blocks dug per forward/backward leg.
-- `descend` (default 2): blocks descended before each leg.
+- `descend` (default 3): blocks descended before each leg.
 - `minFuel` (default 500): stops before starting a new column if fuel
   can't be brought above this.
 - `columnDX` (default -1): x shift applied to each new column, relative
@@ -402,15 +405,14 @@ dofile("/lib/job.lua").stop()
   columns' horizontal legs land at different depths instead of
   perfectly overlapping, exposing more distinct rock per block dug.
 
-The return trip up a column deliberately does **not** use
-`pathfind.goto()`: a column is a narrow, arbitrarily-shaped zigzag
-through solid rock, and pathfind's greedy distance-based search has no
-way to rediscover that shape — it would just get stuck trying to
-shortcut through rock that was never dug. Instead the dig loop records
-exactly what it did and replays that log in reverse. Travel *between*
-columns, over already-surveyed ground, does use `pathfind.goto()` (with
-`allowDig = true`, so a stray surface obstacle can't stall an unattended
-run — edit the file if you'd rather it stop and wait instead).
+The climb back up deliberately doesn't retrace the zigzag turn by turn —
+it just repositions horizontally (via `pathfind.goto()`, `allowDig =
+true`) and digs straight up. That does mean the turtle isn't guaranteed
+to end up facing the same direction it started the column facing, unlike
+the horizontal-shaft `strip.lua`. Travel *between* columns, over
+already-surveyed ground, also uses `pathfind.goto()` with `allowDig =
+true` — so a stray surface obstacle can't stall an unattended run; edit
+the file if you'd rather it stop and wait instead.
 
 `shouldStop()` is only checked once per column iteration (between full
 down+forward+turn cycles), not between individual blocks — so expect up

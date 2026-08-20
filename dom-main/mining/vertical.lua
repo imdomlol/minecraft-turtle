@@ -11,13 +11,17 @@
 
   When a column bottoms out (can't dig down any further -- bedrock, the
   normal end of a column) or a leg is blocked immediately (a side wall,
-  not the bottom), it retraces its own dig log back up to that column's
-  top, shifts to a new column -- x += columnDX every time; the column's
-  *starting height* (y) shifts by columnDY, alternating sign each time,
-  while z stays fixed -- and starts again, forever, until told to stop.
-  Staggering each column's start height rather than starting every column
-  at the same y means adjacent columns' horizontal legs land at
-  different depths instead of perfectly overlapping, exposing more
+  not the bottom), it gets back under the column's own start (x, z) --
+  digging through anything in the way -- and digs straight up to that
+  start's y, rather than retracing the zigzag turn by turn: most of that
+  vertical column is already opened up by the zigzag's own legs crossing
+  through it, a straight climb is far simpler, and for a deep column it's
+  faster too. It then shifts to a new column -- x += columnDX every time;
+  the column's *starting height* (y) shifts by columnDY, alternating sign
+  each time, while z stays fixed -- and starts again, forever, until told
+  to stop. Staggering each column's start height rather than starting
+  every column at the same y means adjacent columns' horizontal legs land
+  at different depths instead of perfectly overlapping, exposing more
   distinct rock per block dug.
 
   Meant to run as a lib/job.lua job (see main.lua), not called directly:
@@ -29,18 +33,6 @@
   iteration (between full down+forward+turn cycles), not between
   individual blocks -- so expect up to roughly a `descend + legLength`
   block actions' worth of latency before a stop actually takes effect.
-
-  The return trip up a column deliberately does NOT use pathfind.goto():
-  a column is a narrow, arbitrarily-shaped zigzag through solid rock, and
-  pathfind's greedy distance-based stepper has no way to rediscover that
-  exact shape -- it would just get stuck trying to shortcut through rock
-  that was never dug. Instead, digColumn() records exactly what it did
-  (down/forward step counts, in order) and returnToColumnStart() replays
-  that log in reverse. Travel *between* columns, over already-surveyed
-  ground, does use pathfind.goto() -- that's a much safer place to trust
-  its greedy search (and, deliberately, allows it to dig through anything
-  minor in the way, so a stray surface block can't stall an unattended
-  run -- set allowDig=false in this file if you'd rather it stop and wait).
 ------------------------------------------------------------------------]]
 
 local nav = dofile("/lib/nav.lua")
@@ -51,7 +43,7 @@ local M = {}
 
 local DEFAULTS = {
   legLength = 10,  -- blocks dug per forward/backward leg
-  descend   = 2,   -- blocks descended before each leg
+  descend   = 3,   -- blocks descended before each leg
   minFuel   = 500, -- abort before starting a new column if fuel can't be brought above this
   columnDX  = -1,  -- x shift applied to each new column, relative to the previous one
   columnDY  = 1,   -- magnitude of the start-height shift each new column; sign alternates every column
@@ -77,6 +69,14 @@ local function digDown()
   return false, "obstructed after " .. MAX_DIG_ATTEMPTS .. " dig attempts"
 end
 
+local function digUp()
+  for _ = 1, MAX_DIG_ATTEMPTS do
+    if not turtle.detectUp() then return nav.up() end
+    if not turtle.digUp() then turtle.attackUp() end
+  end
+  return false, "obstructed after " .. MAX_DIG_ATTEMPTS .. " dig attempts"
+end
+
 -- The turtle is 1 block wide -- unlike strip.lua's 2-tall shaft, a leg
 -- only needs to clear the single cell it's moving into.
 local function tunnelForward(n)
@@ -93,47 +93,53 @@ local function tunnelDown(n)
   return n
 end
 
--- Digs one switchback column. Returns legs (a list of { down = n } / {
--- forward = n } entries, in the exact order things happened) and
--- interrupted (true if shouldStop() cut it short rather than hitting
--- bedrock or a blocked leg).
+local function tunnelUp(n)
+  for i = 1, n do
+    if not digUp() then return i - 1 end
+  end
+  return n
+end
+
+-- Digs one switchback column. Returns legCount (how many forward legs
+-- were attempted) and reason: "bedrock" (can't dig down any further --
+-- the normal end of a column), "blocked" (a leg was obstructed
+-- immediately -- a side wall, not the bottom), or "interrupted"
+-- (shouldStop() cut it short).
 local function digColumn(legLength, descend, shouldStop)
-  local legs = {}
+  local legCount = 0
 
   while true do
     if shouldStop and shouldStop() then
-      return legs, true
+      return legCount, "interrupted"
     end
 
     local dSteps = tunnelDown(descend)
-    legs[#legs + 1] = { down = dSteps }
-    if dSteps < descend then return legs, false end -- bedrock / world bottom
+    if dSteps < descend then return legCount, "bedrock" end
 
     local fSteps = tunnelForward(legLength)
-    legs[#legs + 1] = { forward = fSteps }
-    if fSteps == 0 then return legs, false end -- side wall, not the bottom -- still stop here
+    legCount = legCount + 1
+    if fSteps == 0 then return legCount, "blocked" end
 
     nav.turnRight(); nav.turnRight()
   end
 end
 
--- Replays `legs` in reverse: nav.up() for every down entry, and for every
--- *nonzero* forward entry, turn 180 then nav.back() -- retracing the
--- corridor without re-digging it, since it's already clear. Skipping the
--- turn for a zero-length forward entry (the "blocked leg" case) matters:
--- the real dig loop above only turns 180 after a *successful* leg, so a
--- zero-length one never turned either, and mirroring that keeps every
--- later (chronologically earlier) leg's retrace facing the right way.
-local function returnToColumnStart(legs)
-  for i = #legs, 1, -1 do
-    local leg = legs[i]
-    if leg.down then
-      for _ = 1, leg.down do nav.up() end
-    elseif leg.forward and leg.forward > 0 then
-      nav.turnRight(); nav.turnRight()
-      for _ = 1, leg.forward do nav.back() end
-    end
+-- Gets back under columnStart's (x, z) at the current depth -- digging
+-- through anything in the way, since most of it is already opened up by
+-- the column's own legs -- then digs straight up to columnStart's y.
+local function returnToColumnStart(columnStart)
+  local pos = nav.getPosition()
+  local reached, info = pathfind.goto(columnStart.x, pos.y, columnStart.z, { tolerance = 0, allowDig = true })
+  if not reached then
+    return false, "could not get under column start: " .. tostring(info.reason)
   end
+
+  local needed = columnStart.y - nav.getPosition().y
+  local climbed = tunnelUp(needed)
+  if climbed < needed then
+    return false, "stuck climbing back to column start"
+  end
+  return true
 end
 
 -- Job entry point (see lib/job.lua): params is { legLength, descend,
@@ -171,11 +177,17 @@ function M.run(params, shouldStop)
     print(("vertical: column %d starting at (%d, %d, %d)")
       :format(columnIndex, columnStart.x, columnStart.y, columnStart.z))
 
-    local legs, interrupted = digColumn(legLength, descend, shouldStop)
-    print(("vertical: column %d done -- %d legs, retracing to column start"):format(columnIndex, #legs))
-    returnToColumnStart(legs)
+    local legCount, reason = digColumn(legLength, descend, shouldStop)
+    print(("vertical: column %d done -- %d legs (%s), climbing back to column start")
+      :format(columnIndex, legCount, reason))
 
-    if interrupted then
+    local backOk, backErr = returnToColumnStart(columnStart)
+    if not backOk then
+      print("vertical: could not return to column start -- " .. tostring(backErr))
+      return false, "could not return to column start: " .. tostring(backErr)
+    end
+
+    if reason == "interrupted" then
       print("vertical: interrupted, stopped at column " .. columnIndex .. "'s start")
       return true, { columns = columnIndex, position = nav.getPosition() }
     end
