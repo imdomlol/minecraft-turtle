@@ -125,11 +125,22 @@ function M.run()
     return
   end
 
-  print("remote: connected to " .. cfg.url)
+  print("remote: connecting to " .. cfg.url)
   local id = tostring(os.getComputerID())
+  local lastErr = nil
 
   while true do
     local resp, err = post(cfg, "/poll", { id = id, label = os.getComputerLabel() })
+
+    if err then
+      if err ~= lastErr then
+        print("remote: poll failed: " .. err)
+        lastErr = err
+      end
+    elseif lastErr then
+      print("remote: poll recovered.")
+      lastErr = nil
+    end
 
     if resp and resp.command then
       local ok, output = execute(resp.command)
