@@ -16,6 +16,7 @@ main.lua
 
 # --- shared libraries ---------------------------------------------------
 lib/nav.lua
+lib/pathfind.lua
 
 # --- programs -------------------------------------------------------
 # dom-main/mining/strip.lua    -> strip.lua

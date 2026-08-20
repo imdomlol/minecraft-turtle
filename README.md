@@ -209,3 +209,43 @@ routing all movement through `nav.forward()` / `nav.back()` / `nav.up()`
 `turtle.forward()` etc directly — they return the same values, just also
 update the tracked position on success. State lives in `/state/nav.state`,
 so it survives the OTA wipe.
+
+No GPS network set up? Seed a turtle's position manually (e.g. from the
+F3 debug screen) instead:
+
+```
+dofile("/lib/nav.lua").setPosition(-1358, 61, -4337, "west")
+```
+
+`facing` takes a compass name or a heading number (0=north, 1=east,
+2=south, 3=west). This is tracked separately from a real GPS fix
+(`source` in the returned table is `"gps"`, `"manual"`, or `"relative"`),
+but treated the same as an absolute, trustworthy position everywhere
+else — it's on you to get the reading right, since nothing re-verifies it.
+
+## lib/pathfind.lua
+
+Moves the turtle toward a target position, digging/attacking through
+obstacles only if you allow it:
+
+```
+dofile("/lib/pathfind.lua").goto(-1358, 65, -4337, { tolerance = 1, allowDig = false })
+```
+
+- `tolerance` (default `0`): stop once within this many blocks of the
+  target, rather than requiring an exact arrival.
+- `allowDig` (default `false`): if the direct route is blocked, dig/attack
+  through it instead of only trying to route around via the other axes.
+
+There's no map to plan a real route against — a turtle only ever sees
+the block immediately touching it, not the wider world — so this isn't
+A*. It's a greedy stepper: each step it picks whichever axis (x, z, or y)
+has the largest remaining distance and tries to move that way, falling
+back to the other axes if that fails. If every axis fails, or it's taken
+more than roughly 4x the starting distance in steps without arriving, it
+gives up rather than looping forever. Returns `ok, info` where
+`info.reason` is `"arrived"`, `"stuck: <error>"`, or `"gave up: too many
+steps"`, alongside the final `distance` and `position`. Builds on
+`lib/nav.lua`, so the same rule applies — the tracked position (and thus
+this whole feature) only stays accurate if nothing moves the turtle
+outside of `nav`/`pathfind` mid-trip.
