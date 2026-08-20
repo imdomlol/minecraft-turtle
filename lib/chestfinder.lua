@@ -32,15 +32,16 @@ end
 
 -- Checks the 4 horizontal neighbors (turning through all of them) plus
 -- up/down of the turtle's current cell. Returns the chest's world
--- position and block name if one's touching, leaving the turtle facing
--- it (or unmoved, for up/down) -- or nil if nothing here matches.
+-- position, block name, and which turtle.drop*() variant reaches it
+-- ("front", "up", or "down"), leaving the turtle facing it (or unmoved,
+-- for up/down) -- or nil if nothing here matches.
 local function scanHere(matchName)
   for _ = 1, 4 do
     local found, data = turtle.inspect()
     if found and looksLikeChest(data.name, matchName) then
       local pos = nav.getPosition()
       local d = DELTA[pos.heading]
-      return { x = pos.x + d.x, y = pos.y, z = pos.z + d.z, name = data.name }
+      return { x = pos.x + d.x, y = pos.y, z = pos.z + d.z, name = data.name, direction = "front" }
     end
     nav.turnRight()
   end
@@ -48,13 +49,13 @@ local function scanHere(matchName)
   local foundUp, dataUp = turtle.inspectUp()
   if foundUp and looksLikeChest(dataUp.name, matchName) then
     local pos = nav.getPosition()
-    return { x = pos.x, y = pos.y + 1, z = pos.z, name = dataUp.name }
+    return { x = pos.x, y = pos.y + 1, z = pos.z, name = dataUp.name, direction = "up" }
   end
 
   local foundDown, dataDown = turtle.inspectDown()
   if foundDown and looksLikeChest(dataDown.name, matchName) then
     local pos = nav.getPosition()
-    return { x = pos.x, y = pos.y - 1, z = pos.z, name = dataDown.name }
+    return { x = pos.x, y = pos.y - 1, z = pos.z, name = dataDown.name, direction = "down" }
   end
 
   return nil

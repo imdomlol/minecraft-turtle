@@ -20,6 +20,7 @@ lib/pathfind.lua
 lib/job.lua
 lib/home.lua
 lib/chestfinder.lua
+lib/inventory.lua
 
 # --- programs -------------------------------------------------------
 # strip.lua is WIP -- see the file's own header before deploying it.

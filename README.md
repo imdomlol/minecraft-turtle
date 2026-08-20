@@ -334,7 +334,27 @@ y, z, name }` for the chest and leaves the turtle facing it (ready to
 `turtle.drop()` into it); on failure, returns `nil, reason` and the
 turtle is back where the search started, not stranded mid-spiral.
 `matchName(blockName)` overrides the default "name contains `chest`"
-check, for modded storage that doesn't follow that convention.
+check, for modded storage that doesn't follow that convention. The
+returned table's `direction` (`"front"`, `"up"`, or `"down"`) says which
+`turtle.drop*()` reaches it — see `lib/inventory.lua`.
+
+## lib/inventory.lua
+
+Inventory space/unloading helpers:
+
+```
+dofile("/lib/inventory.lua").isFull()        -- true once every slot has something in it
+dofile("/lib/inventory.lua").emptySlotCount() -- how many slots are completely empty
+dofile("/lib/inventory.lua").dropAll("front") -- drop everything; "front"/"up"/"down"
+```
+
+`isFull()` counts *empty* slots, not remaining stack space — a
+half-full stack of cobblestone doesn't help once the next block dug is
+iron ore, so "full" means no empty slot left at all, not "no room
+anywhere." `dropAll(direction)` drops every nonempty slot that way
+(matching `lib/chestfinder.lua`'s returned `direction`) and returns how
+many slots it emptied; a slot that fails to drop (destination full) is
+just left as-is — this doesn't hunt for another container or retry.
 
 ## dom-main/mining/strip.lua
 
@@ -424,6 +444,14 @@ the horizontal-shaft `strip.lua`. Travel *between* columns, over
 already-surveyed ground, also uses `pathfind.goto()` with `allowDig =
 true` — so a stray surface obstacle can't stall an unattended run; edit
 the file if you'd rather it stop and wait instead.
+
+Checks its inventory (`lib/inventory.lua`) once per column boundary — the
+same granularity as the `shouldStop` check, for the same reason. If full,
+it finds a chest (`lib/chestfinder.lua`, defaulting to `lib/home.lua`'s
+position), drops everything in, and returns to the column it was working
+on before continuing. If no chest can be found, or the one found can't
+take everything, mining stops with a clear reason rather than discarding
+items or looping forever hunting for space.
 
 `shouldStop()` is only checked once per column iteration (between full
 down+forward+turn cycles), not between individual blocks — so expect up

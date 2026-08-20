@@ -36,11 +36,22 @@
   iteration (between full down+forward+turn cycles), not between
   individual blocks -- so expect up to roughly a `descend + legLength`
   block actions' worth of latency before a stop actually takes effect.
+
+  Checks inventory once per column boundary (same granularity as the
+  shouldStop check, and for the same reason -- checking mid-leg would add
+  a lot of complexity for a rare event). If full, it finds a chest (see
+  lib/chestfinder.lua -- defaults to searching around lib/home.lua's
+  position), drops everything in, and returns to the column it was
+  working on before continuing. If no chest can be found, or the one
+  found is itself too full to take everything, mining stops rather than
+  quietly discarding items or looping forever hunting for space.
 ------------------------------------------------------------------------]]
 
 local nav = dofile("/lib/nav.lua")
 local pathfind = dofile("/lib/pathfind.lua")
 local home = dofile("/lib/home.lua")
+local inventory = dofile("/lib/inventory.lua")
+local chestfinder = dofile("/lib/chestfinder.lua")
 
 local M = {}
 
@@ -145,6 +156,33 @@ local function returnToColumnStart(columnStart)
   return true
 end
 
+-- If the inventory's full, finds a chest and empties into it, then
+-- returns to columnStart. Returns true (whether or not anything actually
+-- needed unloading), or false, reason if no chest could be found or the
+-- turtle couldn't get back to columnStart afterward.
+local function unloadIfFull(columnStart)
+  if not inventory.isFull() then return true end
+
+  print("vertical: inventory full, looking for a chest to unload into")
+  local found, reason = chestfinder.find({})
+  if not found then
+    return false, "inventory full, no chest found: " .. tostring(reason)
+  end
+
+  local emptied = inventory.dropAll(found.direction)
+  print(("vertical: unloaded %d slot(s) into chest at (%d, %d, %d)")
+    :format(emptied, found.x, found.y, found.z))
+  if inventory.isFull() then
+    return false, "chest at (" .. found.x .. "," .. found.y .. "," .. found.z .. ") couldn't take everything"
+  end
+
+  local reached, info = pathfind.goto(columnStart.x, columnStart.y, columnStart.z, { tolerance = 0, allowDig = true })
+  if not reached then
+    return false, "could not return to column start after unloading: " .. tostring(info.reason)
+  end
+  return true
+end
+
 -- Job entry point (see lib/job.lua): params is { legLength, descend,
 -- minFuel, columnDX, columnDY }, all optional (see DEFAULTS). Marks home
 -- (lib/home.lua) if nothing's marked yet, so the very first column's top
@@ -174,6 +212,12 @@ function M.run(params, shouldStop)
         print(("vertical: stopping -- fuel %s below minimum %d"):format(tostring(fuel), minFuel))
         return false, "insufficient fuel"
       end
+    end
+
+    local unloadOk, unloadErr = unloadIfFull(columnStart)
+    if not unloadOk then
+      print("vertical: stopping -- " .. tostring(unloadErr))
+      return false, unloadErr
     end
 
     columnIndex = columnIndex + 1
