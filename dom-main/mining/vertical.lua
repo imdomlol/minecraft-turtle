@@ -16,13 +16,16 @@
   start's y, rather than retracing the zigzag turn by turn: most of that
   vertical column is already opened up by the zigzag's own legs crossing
   through it, a straight climb is far simpler, and for a deep column it's
-  faster too. It then shifts to a new column -- x += columnDX every time;
+  faster too. It then shifts to a new column -- z += columnDZ every time;
   the column's *starting height* (y) shifts by columnDY, alternating sign
-  each time, while z stays fixed -- and starts again, forever, until told
-  to stop. Staggering each column's start height rather than starting
-  every column at the same y means adjacent columns' horizontal legs land
-  at different depths instead of perfectly overlapping, exposing more
-  distinct rock per block dug.
+  each time, while x stays fixed -- and starts again, forever, until told
+  to stop. The marching axis (z) is deliberately perpendicular to the leg
+  axis (x, the direction digColumn's own forward/back legs run): marching
+  along x too would just walk new columns down the same line the legs
+  already dug, instead of spreading coverage into a fresh plane.
+  Staggering each column's start height rather than starting every column
+  at the same y means adjacent columns' horizontal legs also land at
+  different depths instead of perfectly overlapping.
 
   Meant to run as a lib/job.lua job (see main.lua), not called directly:
   a run long enough to be worth calling "forever" would otherwise block
@@ -45,7 +48,7 @@ local DEFAULTS = {
   legLength = 10,  -- blocks dug per forward/backward leg
   descend   = 3,   -- blocks descended before each leg
   minFuel   = 500, -- abort before starting a new column if fuel can't be brought above this
-  columnDX  = -1,  -- x shift applied to each new column, relative to the previous one
+  columnDZ  = 1,   -- z shift applied to each new column, relative to the previous one
   columnDY  = 1,   -- magnitude of the start-height shift each new column; sign alternates every column
 }
 
@@ -153,7 +156,7 @@ function M.run(params, shouldStop)
   local legLength = params.legLength or DEFAULTS.legLength
   local descend   = params.descend or DEFAULTS.descend
   local minFuel   = params.minFuel or DEFAULTS.minFuel
-  local columnDX  = params.columnDX or DEFAULTS.columnDX
+  local columnDZ  = params.columnDZ or DEFAULTS.columnDZ
   local columnDY  = params.columnDY or DEFAULTS.columnDY
 
   if not home.get() then home.mark() end
@@ -193,11 +196,11 @@ function M.run(params, shouldStop)
     end
 
     dySign = -dySign
-    local nextX = columnStart.x + columnDX
+    local nextZ = columnStart.z + columnDZ
     local nextY = columnStart.y + (columnDY * dySign)
-    print(("vertical: moving to column %d at (%d, %d, %d)"):format(columnIndex + 1, nextX, nextY, columnStart.z))
+    print(("vertical: moving to column %d at (%d, %d, %d)"):format(columnIndex + 1, columnStart.x, nextY, nextZ))
 
-    local reached, info = pathfind.goto(nextX, nextY, columnStart.z, { tolerance = 0, allowDig = true })
+    local reached, info = pathfind.goto(columnStart.x, nextY, nextZ, { tolerance = 0, allowDig = true })
     if not reached then
       print("vertical: could not reach next column -- " .. tostring(info.reason))
       return false, "could not reach next column: " .. tostring(info.reason)

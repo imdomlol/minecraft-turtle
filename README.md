@@ -387,7 +387,7 @@ permanently block the remote console:
 
 ```
 dofile("/lib/job.lua").request("mine_vertical", {
-  legLength = 10, descend = 3, minFuel = 500, columnDX = -1, columnDY = 1,
+  legLength = 10, descend = 3, minFuel = 500, columnDZ = 1, columnDY = 1,
 })
 dofile("/lib/job.lua").stop()
 ```
@@ -396,14 +396,25 @@ dofile("/lib/job.lua").stop()
 - `descend` (default 3): blocks descended before each leg.
 - `minFuel` (default 500): stops before starting a new column if fuel
   can't be brought above this.
-- `columnDX` (default -1): x shift applied to each new column, relative
-  to the previous one. z never changes.
+- `columnDZ` (default 1): z shift applied to each new column, relative
+  to the previous one. x never changes.
 - `columnDY` (default 1): magnitude of the *starting height* shift each
   new column; sign alternates every column, so columns march steadily in
-  x at a fixed z, staggered up/down by 1 around the original height
+  z at a fixed x, staggered up/down by 1 around the original height
   rather than all starting at the same y. That stagger means adjacent
-  columns' horizontal legs land at different depths instead of
-  perfectly overlapping, exposing more distinct rock per block dug.
+  columns' horizontal legs also land at different depths instead of
+  perfectly overlapping.
+
+The marching axis (z) is deliberately perpendicular to the legs'
+forward/back axis (x, assuming the turtle is facing east or west when
+the job starts — see below): marching along x too would just walk new
+columns down the same line the legs already dug, instead of spreading
+into fresh rock. **This assumes a specific starting orientation** —
+`digColumn`'s legs run along whichever horizontal axis the turtle happens
+to be facing when the job starts (its very first move is a `descend`,
+which doesn't turn it), so marching in z only avoids overlap if that
+start facing is east or west. Face the turtle east or west before
+starting the job if you're relying on the default `columnDZ`.
 
 The climb back up deliberately doesn't retrace the zigzag turn by turn —
 it just repositions horizontally (via `pathfind.goto()`, `allowDig =
