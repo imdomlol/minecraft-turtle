@@ -14,8 +14,10 @@ lib/remote.lua
 remote-setup.lua
 main.lua
 
+# --- shared libraries ---------------------------------------------------
+lib/nav.lua
+
 # --- programs -------------------------------------------------------
 # dom-main/mining/strip.lua    -> strip.lua
 # dom-main/woodcutting/tree.lua -> tree.lua
 # dom-main/exploring/scout.lua -> scout.lua
-# lib/nav.lua

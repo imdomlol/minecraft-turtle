@@ -181,3 +181,31 @@ by `turtlectl.py list` alongside each turtle's label and last-seen time.
 Commands are plain Lua, evaluated the same way CraftOS's own `lua` shell
 program does — bare expressions like `turtle.getFuelLevel()` print their
 return value, and `print(...)` output is captured too.
+
+## lib/nav.lua
+
+A shared "where am I / what's around me" module, meant to be `dofile()`'d
+by other turtle scripts (including one-off commands sent through the
+remote console):
+
+```
+dofile("/lib/nav.lua").report()
+```
+```
+pos: (1, 0, -2)  facing: east  [relative, no GPS fix]
+front: minecraft:stone
+up:    air/none
+down:  minecraft:dirt
+```
+
+`nav.here()` returns the same data as a plain table instead of printing
+it, for scripts to consume programmatically. Position is anchored to a
+real GPS fix if a GPS satellite network is reachable in-world the first
+time a turtle uses it, otherwise it's relative to wherever the turtle
+was when tracking began (0,0,0) — `gpsFixed` in the returned table tells
+you which. Either way, keeping the tracked position accurate requires
+routing all movement through `nav.forward()` / `nav.back()` / `nav.up()`
+/ `nav.down()` / `nav.turnLeft()` / `nav.turnRight()` instead of calling
+`turtle.forward()` etc directly — they return the same values, just also
+update the tracked position on success. State lives in `/state/nav.state`,
+so it survives the OTA wipe.
