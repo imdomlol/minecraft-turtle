@@ -17,8 +17,13 @@ main.lua
 # --- shared libraries ---------------------------------------------------
 lib/nav.lua
 lib/pathfind.lua
+lib/job.lua
+lib/home.lua
+lib/chestfinder.lua
 
 # --- programs -------------------------------------------------------
-dom-main/mining/strip.lua    -> strip.lua
+# strip.lua is WIP -- see the file's own header before deploying it.
+# dom-main/mining/strip.lua    -> strip.lua
+dom-main/mining/vertical.lua
 # dom-main/woodcutting/tree.lua -> tree.lua
 # dom-main/exploring/scout.lua -> scout.lua

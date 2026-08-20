@@ -268,6 +268,74 @@ that would silently go stale the moment `pathfind.goto()` moves the
 turtle. Anything else that dofiles nav.lua in the same running session
 shares that one instance too.
 
+## lib/job.lua
+
+A background job runner, so a long-running task can be redirected from
+the remote console *while it's running*. Without this, a remote command
+blocks the poll loop until it returns (see `lib/remote.lua`'s
+`execute()`) — a job meant to run forever would starve the console of
+ever hearing a "stop". `main.lua` runs `job.run()` alongside
+`remote.run()`, and registers every known job by name before starting it:
+
+```
+job.register("mine_vertical", dofile("/dom-main/mining/vertical.lua").run)
+```
+
+From the remote console, starting/stopping a job is instant — it just
+records what should run next; the switch happens on the job's own next
+check, not synchronously:
+
+```
+dofile("/lib/job.lua").request("mine_vertical", { legLength = 10 })
+dofile("/lib/job.lua").stop()                    -- back to idle
+dofile("/lib/job.lua").status()                  -- { current, params, pending }
+```
+
+A job function is registered as `function(params, shouldStop)` and is
+expected to call `shouldStop()` between steps, returning promptly if it's
+true — how often depends on the job (see `dom-main/mining/vertical.lua`
+for the pattern, and its own caveat about how coarse-grained that check
+is there). Like `lib/nav.lua`, this caches itself on `_G`, since
+`main.lua`'s `dofile()` (running the loop) and a remote command's
+`dofile()` (requesting a switch) must resolve to the same instance or the
+request vanishes into a copy nothing is watching.
+
+## lib/home.lua
+
+Remembers a "home" position and gets back to it — pulled out of
+`lib/pathfind.lua`/`lib/nav.lua` since "remember where I started, return
+there later" is common enough to reuse rather than re-derive per script.
+Persisted separately from `lib/nav.lua`'s own state, so ordinary movement
+never touches it:
+
+```
+dofile("/lib/home.lua").mark()             -- record the current position as home
+dofile("/lib/home.lua").go({ tolerance = 1 })  -- pathfind back to it (opts -> pathfind.goto)
+dofile("/lib/home.lua").get()              -- the recorded position, or nil if never marked
+```
+
+## lib/chestfinder.lua
+
+Locates a nearby chest by physically searching for one — a turtle has no
+long-range scan, only `turtle.inspect()` of whatever's touching it, so
+this walks an expanding square spiral around a point, inspecting as it
+goes:
+
+```
+dofile("/lib/chestfinder.lua").find({ maxRadius = 8 })
+dofile("/lib/chestfinder.lua").find({ x = 100, y = 64, z = -20, maxRadius = 12 })
+```
+
+Defaults to searching around `lib/home.lua`'s recorded position if no
+`x`/`y`/`z` is given. Non-destructive: never digs, and gives up if a step
+is blocked rather than plowing through obstacles — a locator digging
+through walls on its own would be surprising. On success, returns `{ x,
+y, z, name }` for the chest and leaves the turtle facing it (ready to
+`turtle.drop()` into it); on failure, returns `nil, reason` and the
+turtle is back where the search started, not stranded mid-spiral.
+`matchName(blockName)` overrides the default "name contains `chest`"
+check, for modded storage that doesn't follow that convention.
+
 ## dom-main/mining/strip.lua
 
 A branch-mine strip miner — one of what's meant to become several
@@ -292,3 +360,61 @@ Options (all optional): `length` (default 32), `branchInterval` (default
 2), `branchLength` (default 5), `minFuel` (default 200), `returnHome`
 (default true). Returns `ok, info` where `info` is `{ traveled, position
 }` on success or an error string on abort (e.g. insufficient fuel).
+
+**Currently WIP and not deployed** (commented out in `manifest.txt`) —
+the on-disk file doesn't match this description right now (calls a
+`tunnel()` function that no longer exists). Left alone rather than fixed
+here since it looked like in-progress local edits.
+
+## dom-main/mining/vertical.lua
+
+A vertical switchback strip miner — leans on a turtle being 1 block
+wide/tall (unlike a player) to mine straight down a zigzag staircase
+instead of a horizontal shaft: descend, dig a leg, turn 180°, repeat —
+since a descend happens before every leg and legs alternate direction,
+leg N and leg N+2 land on the same footprint one level apart, covering a
+`legLength * 2`-wide vertical slice as it goes. When a column bottoms out
+(bedrock) or a leg is blocked immediately (a side wall), it retraces back
+up to that column's top, shifts to a new column, and starts again —
+forever, until told to stop.
+
+Registered as a job (`mine_vertical`, see `lib/job.lua` above) rather
+than called directly, since a run meant to go forever would otherwise
+permanently block the remote console:
+
+```
+dofile("/lib/job.lua").request("mine_vertical", {
+  legLength = 10, descend = 2, minFuel = 500, columnDX = -1, columnDZ = 1,
+})
+dofile("/lib/job.lua").stop()
+```
+
+- `legLength` (default 10): blocks dug per forward/backward leg.
+- `descend` (default 2): blocks descended before each leg.
+- `minFuel` (default 500): stops before starting a new column if fuel
+  can't be brought above this.
+- `columnDX` (default -1): x shift applied to each new column, relative
+  to the previous one.
+- `columnDZ` (default 1): magnitude of the z shift each new column; sign
+  alternates every column (so the grid zigzags in z while marching
+  steadily in x, rather than spreading across a full 2D area).
+
+The return trip up a column deliberately does **not** use
+`pathfind.goto()`: a column is a narrow, arbitrarily-shaped zigzag
+through solid rock, and pathfind's greedy distance-based search has no
+way to rediscover that shape — it would just get stuck trying to
+shortcut through rock that was never dug. Instead the dig loop records
+exactly what it did and replays that log in reverse. Travel *between*
+columns, over already-surveyed ground, does use `pathfind.goto()` (with
+`allowDig = true`, so a stray surface obstacle can't stall an unattended
+run — edit the file if you'd rather it stop and wait instead).
+
+`shouldStop()` is only checked once per column iteration (between full
+down+forward+turn cycles), not between individual blocks — so expect up
+to roughly a `descend + legLength` block actions' worth of latency
+between requesting a stop and it actually taking effect.
+
+Marks `lib/home.lua`'s position on first start if nothing's marked yet
+(so the very first column's top survives a mid-run reboot), but tracks
+every later column's own top locally — `home` only remembers one
+position, and every column needs its own.
