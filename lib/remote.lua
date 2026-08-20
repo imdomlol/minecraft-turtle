@@ -101,6 +101,14 @@ end
 -- return value instead of silently discarding it as a statement. Falls
 -- back to the raw parse for genuine statements ("for i=1,3 do ... end")
 -- that don't compile with "return" in front.
+-- Many turtle API calls return more than one value on failure, e.g.
+-- turtle.forward() -> false, "Out of fuel". A plain `local ok, result =
+-- pcall(fn)` would silently drop that second value, so capture all of
+-- them via varargs instead.
+local function packAll(...)
+  return select("#", ...), { ... }
+end
+
 local function execute(command)
   local fn = load("return " .. command, "=remote")
   local loadErr
@@ -111,17 +119,22 @@ local function execute(command)
 
   local capture, buf = newCaptureTerm()
   local realTerm = term.redirect(capture)
-  local ok, result = pcall(fn)
+  local n, results = packAll(pcall(fn))
   term.redirect(realTerm)
 
+  local ok = results[1]
   local output = table.concat(buf):gsub("^%s+", ""):gsub("%s+$", "")
 
   if not ok then
-    local msg = "error: " .. tostring(result)
+    local msg = "error: " .. tostring(results[2])
     return false, (output ~= "" and (output .. "\n" .. msg) or msg)
   end
-  if result ~= nil then
-    output = (output ~= "" and (output .. "\n") or "") .. "= " .. tostring(result)
+  if n > 1 then
+    local parts = {}
+    for i = 2, n do
+      parts[#parts + 1] = tostring(results[i])
+    end
+    output = (output ~= "" and (output .. "\n") or "") .. "= " .. table.concat(parts, ", ")
   end
   return true, output
 end
