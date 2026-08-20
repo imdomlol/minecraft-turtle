@@ -17,6 +17,7 @@ local STATE_PATH  = "/state/nav.state"
 local GPS_TIMEOUT = 2 -- seconds
 
 local HEADINGS = { "north", "east", "south", "west" }
+local HEADING_BY_NAME = { north = 0, east = 1, south = 2, west = 3 }
 local DELTA = {
   [0] = { x = 0,  z = -1 }, -- north
   [1] = { x = 1,  z = 0 },  -- east
@@ -49,12 +50,30 @@ local function init()
   state = loadState()
   if state then return end
 
-  state = { x = 0, y = 0, z = 0, heading = 0, gpsFixed = false }
+  state = { x = 0, y = 0, z = 0, heading = 0, source = "relative" }
   local x, y, z = gps.locate(GPS_TIMEOUT)
   if x then
     state.x, state.y, state.z = x, y, z
-    state.gpsFixed = true
+    state.source = "gps"
   end
+  save()
+end
+
+-- Overrides the tracked position/heading -- e.g. after reading real
+-- coordinates off the F3 debug screen when no GPS network is set up.
+-- `facing` may be a heading number (0-3) or a compass name ("west", etc).
+function M.setPosition(x, y, z, facing)
+  local heading
+  if type(facing) == "string" then
+    heading = HEADING_BY_NAME[facing:lower()]
+    if not heading then error("unknown facing: " .. tostring(facing), 2) end
+  elseif type(facing) == "number" then
+    heading = facing % 4
+  else
+    error("facing must be a heading number (0-3) or a compass name", 2)
+  end
+
+  state = { x = x, y = y, z = z, heading = heading, source = "manual" }
   save()
 end
 
@@ -66,7 +85,8 @@ function M.getPosition()
     x = state.x, y = state.y, z = state.z,
     heading = state.heading,
     facing = HEADINGS[state.heading + 1],
-    gpsFixed = state.gpsFixed,
+    gpsFixed = state.source ~= "relative",
+    source = state.source,
   }
 end
 
@@ -90,7 +110,8 @@ function M.here()
     x = state.x, y = state.y, z = state.z,
     heading = state.heading,
     facing = HEADINGS[state.heading + 1],
-    gpsFixed = state.gpsFixed,
+    gpsFixed = state.source ~= "relative",
+    source = state.source,
     front = M.inspectFront(),
     up = M.inspectUp(),
     down = M.inspectDown(),
@@ -107,10 +128,11 @@ end
 -- console) or called from a script.
 function M.report()
   local info = M.here()
-  print(("pos: (%d, %d, %d)  facing: %s%s"):format(
-    info.x, info.y, info.z, info.facing,
-    info.gpsFixed and "" or "  [relative, no GPS fix]"
-  ))
+  local tag = ""
+  if info.source == "relative" then tag = "  [relative, no GPS fix]"
+  elseif info.source == "manual" then tag = "  [manually calibrated]"
+  end
+  print(("pos: (%d, %d, %d)  facing: %s%s"):format(info.x, info.y, info.z, info.facing, tag))
   print("front: " .. describeBlock(info.front))
   print("up:    " .. describeBlock(info.up))
   print("down:  " .. describeBlock(info.down))
