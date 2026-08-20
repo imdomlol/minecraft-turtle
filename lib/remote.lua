@@ -132,7 +132,8 @@ local function execute(command)
   if n > 1 then
     local parts = {}
     for i = 2, n do
-      parts[#parts + 1] = tostring(results[i])
+      local v = results[i]
+      parts[#parts + 1] = type(v) == "table" and textutils.serialize(v) or tostring(v)
     end
     output = (output ~= "" and (output .. "\n") or "") .. "= " .. table.concat(parts, ", ")
   end
