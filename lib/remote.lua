@@ -10,6 +10,8 @@
 local CONFIG_PATH   = "/state/remote.cfg"
 local POLL_INTERVAL = 3    -- seconds between polls when idle
 local ERROR_BACKOFF = 10   -- seconds to wait after a network/HTTP error
+local LOG_PUSH_INTERVAL = 1.5 -- seconds between live-console flushes
+local MAX_PENDING_LOG   = 8000 -- chars; oldest dropped first if the relay is unreachable
 
 local M = {}
 
@@ -61,6 +63,67 @@ local function post(cfg, path, body)
   local ok, decoded = pcall(textutils.unserializeJSON, respBody)
   if not ok then return nil, "bad response json" end
   return decoded
+end
+
+-- Everything ever printed to this turtle's screen -- boot messages, remote
+-- command output, whatever a future "day job" script prints -- accumulates
+-- here so streamLoop() can ship it to the relay for `turtlectl.py console`.
+-- Kept as a plain string rather than a growing table: appends are rare
+-- enough (one per screen write) that this isn't a hot path.
+local pendingLog = ""
+
+local function appendLog(text)
+  pendingLog = pendingLog .. text
+  if #pendingLog > MAX_PENDING_LOG then
+    pendingLog = pendingLog:sub(-MAX_PENDING_LOG)
+  end
+end
+
+-- Removes exactly the prefix that was just sent, not everything pending --
+-- more may have been appended (e.g. by execute()) while the POST was in
+-- flight, since http.post yields to other coroutines under parallel.
+local function dropSentLog(sent)
+  if pendingLog:sub(1, #sent) == sent then
+    pendingLog = pendingLog:sub(#sent + 1)
+  end
+end
+
+-- Wraps a real term so everything written through it still reaches the
+-- real screen, but is also mirrored into pendingLog. Mirrors newCaptureTerm's
+-- write/setCursorPos->newline logic; everything else just passes through.
+local function newTeeTerm(real)
+  local cursorY = select(2, real.getCursorPos())
+  local t = {}
+  function t.write(text)
+    real.write(text)
+    appendLog(tostring(text))
+  end
+  function t.blit(text, fg, bg)
+    real.blit(text, fg, bg)
+    appendLog(tostring(text))
+  end
+  function t.setCursorPos(x, y)
+    if y ~= cursorY then appendLog("\n") end
+    cursorY = y
+    real.setCursorPos(x, y)
+  end
+  function t.scroll(n)
+    real.scroll(n)
+    appendLog("\n")
+  end
+  local passthrough = {
+    "getCursorPos", "getSize", "clear", "clearLine", "setCursorBlink",
+    "isColor", "isColour", "getTextColor", "getTextColour",
+    "setTextColor", "setTextColour", "getBackgroundColor", "getBackgroundColour",
+    "setBackgroundColor", "setBackgroundColour",
+    "getPaletteColor", "getPaletteColour", "setPaletteColor", "setPaletteColour",
+  }
+  for _, name in ipairs(passthrough) do
+    if real[name] then
+      t[name] = function(...) return real[name](...) end
+    end
+  end
+  return t
 end
 
 -- A minimal term-API implementation that just records what was written,
@@ -115,7 +178,11 @@ local function execute(command)
   if not fn then
     fn, loadErr = load(command, "=remote")
   end
-  if not fn then return false, "compile error: " .. tostring(loadErr) end
+  if not fn then
+    local msg = "compile error: " .. tostring(loadErr)
+    appendLog("> " .. command .. "\n" .. msg .. "\n")
+    return false, msg
+  end
 
   local capture, buf = newCaptureTerm()
   local realTerm = term.redirect(capture)
@@ -127,9 +194,8 @@ local function execute(command)
 
   if not ok then
     local msg = "error: " .. tostring(results[2])
-    return false, (output ~= "" and (output .. "\n" .. msg) or msg)
-  end
-  if n > 1 then
+    output = (output ~= "" and (output .. "\n" .. msg) or msg)
+  elseif n > 1 then
     local parts = {}
     for i = 2, n do
       local v = results[i]
@@ -137,25 +203,15 @@ local function execute(command)
     end
     output = (output ~= "" and (output .. "\n") or "") .. "= " .. table.concat(parts, ", ")
   end
-  return true, output
+
+  -- Command output is captured on a term that's swapped away from the tee
+  -- while it runs, so it never reaches pendingLog on its own -- add it
+  -- explicitly so the live console feed shows commands as they execute.
+  appendLog("> " .. command .. "\n" .. output .. "\n")
+  return ok, output
 end
 
--- Blocks forever, polling for and running commands. Meant to be run
--- alongside other turtle work via parallel.waitForAny.
-function M.run()
-  if not http then
-    print("remote: http api disabled, cannot reach relay.")
-    return
-  end
-
-  local cfg = M.loadConfig()
-  if not cfg then
-    print("remote: not configured. run remote-setup.lua once.")
-    return
-  end
-
-  print("remote: connecting to " .. cfg.url)
-  local id = tostring(os.getComputerID())
+local function pollLoop(cfg, id)
   local lastErr = nil
 
   while true do
@@ -185,6 +241,47 @@ function M.run()
       sleep(err and ERROR_BACKOFF or POLL_INTERVAL)
     end
   end
+end
+
+-- Ships pendingLog to the relay every LOG_PUSH_INTERVAL seconds, for
+-- `turtlectl.py console <id>` to tail. Best-effort: a failed push just
+-- retries next tick with whatever's accumulated since (capped, see
+-- appendLog), rather than blocking or erroring the whole console loop.
+local function streamLoop(cfg, id)
+  while true do
+    sleep(LOG_PUSH_INTERVAL)
+    if pendingLog ~= "" then
+      local chunk = pendingLog
+      local _, err = post(cfg, "/log", { id = id, text = chunk })
+      if not err then dropSentLog(chunk) end
+    end
+  end
+end
+
+-- Blocks forever, polling for and running commands while also streaming
+-- everything printed to the screen to the relay's live console feed.
+-- Meant to be run alongside other turtle work via parallel.waitForAny.
+function M.run()
+  if not http then
+    print("remote: http api disabled, cannot reach relay.")
+    return
+  end
+
+  local cfg = M.loadConfig()
+  if not cfg then
+    print("remote: not configured. run remote-setup.lua once.")
+    return
+  end
+
+  print("remote: connecting to " .. cfg.url)
+  local id = tostring(os.getComputerID())
+
+  term.redirect(newTeeTerm(term.current()))
+
+  parallel.waitForAny(
+    function() pollLoop(cfg, id) end,
+    function() streamLoop(cfg, id) end
+  )
 end
 
 return M

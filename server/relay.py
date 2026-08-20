@@ -4,12 +4,14 @@ relay.py -- HTTP command relay between an operator and ComputerCraft turtles.
 
 Turtles poll  POST /poll {id, label}                for a queued command
 Turtles post  POST /result {id, cmd_id, ok, output}  when a command finishes
+Turtles post  POST /log {id, text}                   append to the live console feed
 
 Operators (via turtlectl.py or curl) use:
   POST /cmd?id=<id>   {command}   queue a command for one turtle
   POST /cmd_all       {command}   queue a command for every known turtle
   GET  /status                    list turtles and when they last checked in
   GET  /results?id=<id>           recent results for one turtle
+  GET  /log?id=<id>&after=<n>     live console feed since offset n
 
 Every request must include:  Authorization: Bearer <token>
 Set the shared secret via the RELAY_TOKEN environment variable before
@@ -33,9 +35,11 @@ if not TOKEN:
 
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relay_state.json")
 MAX_RESULTS_PER_TURTLE = 50
+MAX_LOG_CHARS = 20000  # per turtle; logs are in-memory only, not persisted
 
 lock = threading.Lock()
 state = {"turtles": {}, "queue": {}, "results": {}}
+logs = {}  # tid -> {"text": str, "base": int}  (base = chars trimmed off the front)
 
 
 def load_state():
@@ -110,6 +114,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_poll(body)
         if path == "/result":
             return self._handle_result(body)
+        if path == "/log":
+            return self._handle_log_post(body)
         if path == "/cmd":
             return self._handle_cmd(params.get("id"), body)
         if path == "/cmd_all":
@@ -125,6 +131,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_status()
         if path == "/results":
             return self._handle_results(params.get("id"))
+        if path == "/log":
+            return self._handle_log_get(params.get("id"), params.get("after"))
         return self._send_json(404, {"error": "not found"})
 
     def _handle_poll(self, body):
@@ -158,6 +166,31 @@ class Handler(BaseHTTPRequestHandler):
             del results[:-MAX_RESULTS_PER_TURTLE]
             save_state()
         return self._send_json(200, {"ok": True})
+
+    def _handle_log_post(self, body):
+        tid = str(body.get("id") or "")
+        text = body.get("text")
+        if not tid or not text:
+            return self._send_json(400, {"error": "missing id or text"})
+        with lock:
+            entry = logs.setdefault(tid, {"text": "", "base": 0})
+            entry["text"] += text
+            if len(entry["text"]) > MAX_LOG_CHARS:
+                trim = len(entry["text"]) - MAX_LOG_CHARS
+                entry["text"] = entry["text"][trim:]
+                entry["base"] += trim
+        return self._send_json(200, {"ok": True})
+
+    def _handle_log_get(self, tid, after):
+        if not tid:
+            return self._send_json(400, {"error": "missing id query param"})
+        with lock:
+            entry = logs.get(tid, {"text": "", "base": 0})
+            after_n = max(int(after or 0), entry["base"])
+            start = after_n - entry["base"]
+            text = entry["text"][start:]
+            cursor = entry["base"] + len(entry["text"])
+        return self._send_json(200, {"text": text, "cursor": cursor})
 
     def _handle_cmd(self, tid, body):
         if not tid:

@@ -174,6 +174,7 @@ python3 server/turtlectl.py send 12 turtle.getFuelLevel()
 python3 server/turtlectl.py send-all os.getComputerLabel()
 python3 server/turtlectl.py results 12
 python3 server/turtlectl.py watch 12                    # stream new results
+python3 server/turtlectl.py console 12                  # live feed of the turtle's screen
 ```
 
 Turtle IDs are their CC:Tweaked computer ID (`os.getComputerID()`), shown
@@ -181,6 +182,16 @@ by `turtlectl.py list` alongside each turtle's label and last-seen time.
 Commands are plain Lua, evaluated the same way CraftOS's own `lua` shell
 program does — bare expressions like `turtle.getFuelLevel()` print their
 return value, and `print(...)` output is captured too.
+
+`console` is different from `watch`: `watch` only shows the result of
+commands you send through the relay, while `console` mirrors everything
+that ever gets printed to the turtle's actual screen — boot messages,
+whatever a "day job" script prints on its own, and remote command
+output — as it happens, polled at ~1-2s resolution. It works by wrapping
+the turtle's `term` so every write is both shown on the real screen and
+shipped to the relay; the relay keeps the last ~20K characters per
+turtle in memory only (not persisted to `relay_state.json`), so history
+resets on a relay restart.
 
 ## lib/nav.lua
 

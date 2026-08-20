@@ -8,6 +8,7 @@ Usage:
   turtlectl.py send-all <command...>
   turtlectl.py results <id> [-n N]
   turtlectl.py watch <id>
+  turtlectl.py console <id>
 
 Reads RELAY_URL and RELAY_TOKEN from the environment; --url/--token override.
 """
@@ -64,6 +65,9 @@ def main():
     wp = sub.add_parser("watch")
     wp.add_argument("id")
 
+    cp = sub.add_parser("console")
+    cp.add_argument("id")
+
     args = p.parse_args()
     if not args.token:
         print("error: set RELAY_TOKEN or pass --token", file=sys.stderr)
@@ -103,6 +107,21 @@ def main():
                     print_result(r)
                 seen = len(results)
                 time.sleep(2)
+        except KeyboardInterrupt:
+            pass
+
+    elif args.cmd == "console":
+        cursor = 0
+        print(f"live console for turtle {args.id} (ctrl-c to stop)")
+        try:
+            while True:
+                res = request(f"{url}/log?id={args.id}&after={cursor}", args.token)
+                text = res.get("text", "")
+                if text:
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                cursor = res.get("cursor", cursor)
+                time.sleep(1)
         except KeyboardInterrupt:
             pass
 
