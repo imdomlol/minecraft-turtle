@@ -150,6 +150,13 @@ end
 -- block and retry, repeating until it succeeds or there's nowhere higher
 -- left to try (climbing all the way to columnStart.y without success
 -- means something other than a shallow bedrock pocket is blocking it).
+--
+-- Deliberately does NOT take a shouldStop -- this runs right after
+-- digColumn() stops, including when it stopped *because* a stop was
+-- already requested, so passing that same shouldStop through would abort
+-- this immediately and strand the turtle mid-column instead of safely
+-- back at its top. This is a recovery step, not new work; it always
+-- has to finish.
 local function returnToColumnStart(columnStart)
   local pos = nav.getPosition()
 
@@ -180,7 +187,10 @@ end
 -- If the inventory's full, finds a chest and empties into it, then
 -- returns to columnStart. Returns true (whether or not anything actually
 -- needed unloading), or false, reason if no chest could be found or the
--- turtle couldn't get back to columnStart afterward.
+-- turtle couldn't get back to columnStart afterward. No shouldStop here
+-- either, for the same reason as returnToColumnStart above -- the trip
+-- back to columnStart is a recovery step and must finish once started,
+-- not be cut short by a stop request that arrived while it was full.
 local function unloadIfFull(columnStart)
   if not inventory.isFull() then return true end
 
@@ -265,8 +275,16 @@ function M.run(params, shouldStop)
     local nextY = columnStart.y + (columnDY * dySign)
     print(("vertical: moving to column %d at (%d, %d, %d)"):format(columnIndex + 1, columnStart.x, nextY, nextZ))
 
-    local reached, info = pathfind.goto(columnStart.x, nextY, nextZ, { tolerance = 0, allowDig = true })
+    -- shouldStop here (unlike returnToColumnStart/unloadIfFull's own
+    -- travel above) is safe to interrupt: this is "start of the next
+    -- unit of work", not a safety step recovering from one already in
+    -- progress, so it's fine for a fresh stop request to cut it short.
+    local reached, info = pathfind.goto(columnStart.x, nextY, nextZ, { tolerance = 0, allowDig = true, shouldStop = shouldStop })
     if not reached then
+      if info.reason == "interrupted" then
+        print("vertical: interrupted while moving to the next column")
+        return true, { columns = columnIndex, position = nav.getPosition() }
+      end
       print("vertical: could not reach next column -- " .. tostring(info.reason))
       return false, "could not reach next column: " .. tostring(info.reason)
     end

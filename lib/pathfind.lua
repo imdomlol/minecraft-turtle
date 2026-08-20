@@ -15,6 +15,8 @@
   outside of pathfind/nav during the trip.
 ------------------------------------------------------------------------]]
 
+if _G.__PATHFIND_MODULE then return _G.__PATHFIND_MODULE end
+
 local nav = dofile("/lib/nav.lua")
 
 local M = {}
@@ -115,15 +117,21 @@ end
 -- Moves toward (x, y, z) until within `opts.tolerance` blocks of it
 -- (default 0, i.e. exact) or it gives up. opts.allowDig (default false)
 -- controls whether it digs/attacks through obstacles or just routes
--- around them via the other axes.
+-- around them via the other axes. opts.shouldStop, if given, is checked
+-- before every single step (the finest granularity anything in this repo
+-- uses -- unlike e.g. dom-main/mining/vertical.lua's own per-column
+-- check, a stuck or merely slow multi-hundred-block trip can otherwise
+-- block the console for its entire duration with no way to call it off).
 --
 -- Returns ok, info where info = { reason, distance, position }. reason
 -- is "arrived", "stuck: <error>" (every axis failed with nothing left to
--- try), or "gave up: too many steps" (safety cap hit).
+-- try), "interrupted" (shouldStop() returned true), or "gave up: too
+-- many steps" (safety cap hit).
 function M.goto(x, y, z, opts)
   opts = opts or {}
   local tolerance = opts.tolerance or 0
   local allowDig = opts.allowDig or false
+  local shouldStop = opts.shouldStop
   local target = { x = x, y = y, z = z }
 
   local pos = nav.getPosition()
@@ -134,6 +142,13 @@ function M.goto(x, y, z, opts)
     :format(x, y, z, tolerance, tostring(allowDig)))
 
   for _ = 1, maxSteps do
+    if shouldStop and shouldStop() then
+      pos = nav.getPosition()
+      local d = dist(target.x - pos.x, target.y - pos.y, target.z - pos.z)
+      print(("pathfind: interrupted, %.1f blocks from target"):format(d))
+      return false, { reason = "interrupted", distance = d, position = pos }
+    end
+
     pos = nav.getPosition()
     local dx, dy, dz = target.x - pos.x, target.y - pos.y, target.z - pos.z
     local d = dist(dx, dy, dz)
@@ -156,4 +171,5 @@ function M.goto(x, y, z, opts)
   return false, { reason = "gave up: too many steps", distance = d, position = pos }
 end
 
+_G.__PATHFIND_MODULE = M
 return M

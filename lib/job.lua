@@ -69,15 +69,16 @@ end
 -- plain command does -- that starves the poll loop of answering
 -- anything else, even a quick nav.report(), until the trip finishes.
 -- Params: x, y, z, tolerance (default 0), allowDig (default false).
--- Note: pathfind.goto() has no interruption hook of its own, so
--- shouldStop only matters between M.run()'s own steps, not mid-trip --
--- once started this runs to completion or failure, same as before,
--- it's just no longer blocking anything else while it does.
-M.register("goto", function(params, _shouldStop)
+-- shouldStop is passed straight through to pathfind.goto(), which checks
+-- it before every single step -- so dofile("/lib/job.lua").stop() (or
+-- switching to a different job) now interrupts a "goto" job almost
+-- immediately, not just between steps of some coarser outer loop.
+M.register("goto", function(params, shouldStop)
   local pathfind = dofile("/lib/pathfind.lua")
   return pathfind.goto(params.x, params.y, params.z, {
     tolerance = params.tolerance,
     allowDig = params.allowDig,
+    shouldStop = shouldStop,
   })
 end)
 

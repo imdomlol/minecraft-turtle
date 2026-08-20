@@ -293,6 +293,12 @@ dofile("/lib/pathfind.lua").goto(-1358, 65, -4337, { tolerance = 1, allowDig = f
   target, rather than requiring an exact arrival.
 - `allowDig` (default `false`): if the direct route is blocked, dig/attack
   through it instead of only trying to route around via the other axes.
+- `shouldStop` (optional, a `function() -> boolean`): checked before
+  every single step — the finest-grained interruption point in this
+  repo. A multi-hundred-block trip (or a merely slow one) would otherwise
+  block whatever called it for the entire duration with no way to call
+  it off; see `lib/job.lua`'s `"goto"` job below, which wires this up to
+  `job.stop()`/switching jobs.
 
 There's no map to plan a real route against — a turtle only ever sees
 the block immediately touching it, not the wider world — so this isn't
@@ -301,18 +307,23 @@ has the largest remaining distance and tries to move that way, falling
 back to the other axes if that fails. If every axis fails, or it's taken
 more than roughly 4x the starting distance in steps without arriving, it
 gives up rather than looping forever. Returns `ok, info` where
-`info.reason` is `"arrived"`, `"stuck: <error>"`, or `"gave up: too many
-steps"`, alongside the final `distance` and `position`. Builds on
-`lib/nav.lua`, so the same rule applies — the tracked position (and thus
-this whole feature) only stays accurate if nothing moves the turtle
-outside of `nav`/`pathfind` mid-trip.
+`info.reason` is `"arrived"`, `"stuck: <error>"`, `"interrupted"`
+(`shouldStop()` returned true), or `"gave up: too many steps"`, alongside
+the final `distance` and `position`. Builds on `lib/nav.lua`, so the same
+rule applies — the tracked position (and thus this whole feature) only
+stays accurate if nothing moves the turtle outside of `nav`/`pathfind`
+mid-trip.
 
-`lib/nav.lua` caches itself on `_G` the first time any script `dofile()`s
-it, so `pathfind.lua`'s own internal `dofile("/lib/nav.lua")` gets back
-the exact same instance rather than a second, independently-tracked copy
-that would silently go stale the moment `pathfind.goto()` moves the
-turtle. Anything else that dofiles nav.lua in the same running session
-shares that one instance too.
+`lib/nav.lua` (and `lib/pathfind.lua` itself) cache themselves on `_G`
+the first time any script `dofile()`s them, so `pathfind.lua`'s own
+internal `dofile("/lib/nav.lua")` gets back the exact same nav instance
+rather than a second, independently-tracked copy that would silently go
+stale the moment `pathfind.goto()` moves the turtle — and repeated
+`dofile("/lib/pathfind.lua")` calls (there are several: inside
+`lib/job.lua`'s `"goto"` job every time it runs, inside
+`lib/chestfinder.lua`, inside `lib/home.lua`) don't each re-parse the
+file from disk. Anything else that dofiles either in the same running
+session shares those same instances too.
 
 ## lib/job.lua
 
@@ -357,11 +368,11 @@ dofile("/lib/job.lua").request("goto", { x = -89, y = 70, z = -87, allowDig = tr
 ```
 
 Same params as `pathfind.goto()` (`x`, `y`, `z`, `tolerance`,
-`allowDig`). Note it can't be cancelled mid-trip — `pathfind.goto()` has
-no interruption hook of its own, so `shouldStop` only matters between
-`M.run()`'s own steps, not partway through one; once started it runs to
-completion or failure like any other command would, it just no longer
-blocks the console while doing it.
+`allowDig`) — and, unlike a plain command, it *can* be cancelled mid-trip:
+`shouldStop` is passed straight through to `pathfind.goto()`, which
+checks it before every step, so `dofile("/lib/job.lua").stop()` (or
+switching to a different job) interrupts a `"goto"` job almost
+immediately rather than only between whole commands.
 
 ## lib/home.lua
 
@@ -530,6 +541,15 @@ position), drops everything in, and returns to the column it was working
 on before continuing. If no chest can be found, or the one found can't
 take everything, mining stops with a clear reason rather than discarding
 items or looping forever hunting for space.
+
+`shouldStop` reaches `pathfind.goto()`'s per-step check for the travel
+*to the next column* (interrupting that is safe — it's the start of new
+work), but deliberately **not** for the climb back to a column's own top
+or the trip back after unloading — those are recovery steps that run
+right after a stop was already requested (that's often *why* the column
+stopped), so passing the same `shouldStop` through would abort them
+immediately and strand the turtle mid-column instead of getting it
+somewhere safe first.
 
 `shouldStop()` is only checked once per column iteration (between full
 down+forward+turn cycles), not between individual blocks — so expect up
