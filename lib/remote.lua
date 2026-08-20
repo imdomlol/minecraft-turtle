@@ -13,6 +13,16 @@ local ERROR_BACKOFF = 10   -- seconds to wait after a network/HTTP error
 
 local M = {}
 
+-- Tolerates a URL typed without a scheme (e.g. "example.com" instead of
+-- "https://example.com") and a trailing slash, both easy to fat-finger
+-- at the remote-setup prompt and otherwise a confusing http.post failure.
+function M.normalizeUrl(url)
+  if not url:match("^https?://") then
+    url = "https://" .. url
+  end
+  return (url:gsub("/+$", ""))
+end
+
 function M.loadConfig()
   if not fs.exists(CONFIG_PATH) then return nil end
   local f = fs.open(CONFIG_PATH, "r")
@@ -22,6 +32,7 @@ function M.loadConfig()
   if not ok or type(cfg) ~= "table" or not cfg.url or not cfg.token then
     return nil
   end
+  cfg.url = M.normalizeUrl(cfg.url)
   return cfg
 end
 

@@ -36,7 +36,7 @@ if not url or url == "" or not token or token == "" then
   return
 end
 
-remote.saveConfig({ url = url, token = token })
+remote.saveConfig({ url = remote.normalizeUrl(url), token = token })
 print("")
 print("saved to /state/remote.cfg")
 print("this turtle will start polling the relay on next boot (or run main.lua now).")
