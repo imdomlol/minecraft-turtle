@@ -11,7 +11,19 @@
   directly desyncs the tracked position.
 
   State persists to /state/nav.state, which survives startup.lua's wipe.
+
+  dofile() (unlike require()) always re-executes a file and hands back a
+  fresh table, so anything else that also dofile()s this -- lib/pathfind.lua
+  included -- would otherwise get its own independent copy of `state`,
+  invisible to a caller's own `nav` handle. A caller that moves via its own
+  nav.forward()/etc, then hands off to pathfind.goto() (which dofiles this
+  file again internally), would see its own nav.getPosition() go stale the
+  moment pathfind starts moving the turtle. Guard against that by caching
+  the built module on _G so every dofile() of this file in the same running
+  session returns the exact same instance.
 ------------------------------------------------------------------------]]
+
+if _G.__NAV_MODULE then return _G.__NAV_MODULE end
 
 local STATE_PATH  = "/state/nav.state"
 local GPS_TIMEOUT = 2 -- seconds
@@ -203,4 +215,5 @@ function M.turnRight()
   return ok, err
 end
 
+_G.__NAV_MODULE = M
 return M

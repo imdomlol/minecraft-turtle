@@ -260,3 +260,35 @@ steps"`, alongside the final `distance` and `position`. Builds on
 `lib/nav.lua`, so the same rule applies — the tracked position (and thus
 this whole feature) only stays accurate if nothing moves the turtle
 outside of `nav`/`pathfind` mid-trip.
+
+`lib/nav.lua` caches itself on `_G` the first time any script `dofile()`s
+it, so `pathfind.lua`'s own internal `dofile("/lib/nav.lua")` gets back
+the exact same instance rather than a second, independently-tracked copy
+that would silently go stale the moment `pathfind.goto()` moves the
+turtle. Anything else that dofiles nav.lua in the same running session
+shares that one instance too.
+
+## dom-main/mining/strip.lua
+
+A branch-mine strip miner — one of what's meant to become several
+`dom-main/<category>/*.lua` programs (see the commented-out entries in
+`manifest.txt`), deployed flattened to the turtle's root:
+
+```
+dofile("/strip.lua").run({ length = 32, branchInterval = 3, branchLength = 5 })
+```
+
+Digs a 2-tall main shaft forward; every `branchInterval` blocks it digs a
+branch out to each side before continuing. It doesn't chase ore veins —
+just clears everything inside the tunnels it digs, like any classic strip
+miner — since following veins would need a per-modpack list of ore block
+names this script has no way to know. Checks fuel before starting (and
+tries `turtle.refuel()` once if short) rather than digging partway and
+stranding itself; by default pathfinds back to the starting position when
+done (`returnHome = false` to skip that). Doesn't yet manage a full
+inventory — that's a known gap for a future pass, same as vein-following.
+
+Options (all optional): `length` (default 32), `branchInterval` (default
+2), `branchLength` (default 5), `minFuel` (default 200), `returnHome`
+(default true). Returns `ok, info` where `info` is `{ traveled, position
+}` on success or an error string on abort (e.g. insufficient fuel).

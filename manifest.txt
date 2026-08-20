@@ -19,6 +19,6 @@ lib/nav.lua
 lib/pathfind.lua
 
 # --- programs -------------------------------------------------------
-# dom-main/mining/strip.lua    -> strip.lua
+dom-main/mining/strip.lua    -> strip.lua
 # dom-main/woodcutting/tree.lua -> tree.lua
 # dom-main/exploring/scout.lua -> scout.lua
