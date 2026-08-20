@@ -8,7 +8,7 @@ Usage:
   turtlectl.py send-all <command...>
   turtlectl.py results <id> [-n N]
   turtlectl.py watch <id>
-  turtlectl.py console <id>
+  turtlectl.py console <id>   -- live screen feed; type a command + enter to send it
 
 Reads RELAY_URL and RELAY_TOKEN from the environment; --url/--token override.
 """
@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -111,19 +112,61 @@ def main():
             pass
 
     elif args.cmd == "console":
-        cursor = 0
-        print(f"live console for turtle {args.id} (ctrl-c to stop)")
+        stop = threading.Event()
+        cursor = [0]
+
+        def poll_loop():
+            last_err = None
+            while not stop.is_set():
+                try:
+                    req = urllib.request.Request(f"{url}/log?id={args.id}&after={cursor[0]}")
+                    req.add_header("Authorization", f"Bearer {args.token}")
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        res = json.loads(resp.read().decode("utf-8"))
+                    text = res.get("text", "")
+                    if text:
+                        sys.stdout.write(text)
+                        sys.stdout.flush()
+                    cursor[0] = res.get("cursor", cursor[0])
+                    if last_err:
+                        print("\n[console: reconnected]", file=sys.stderr)
+                        last_err = None
+                except Exception as e:
+                    if str(e) != last_err:
+                        print(f"\n[console: poll error: {e}]", file=sys.stderr)
+                        last_err = str(e)
+                stop.wait(1)
+
+        poller = threading.Thread(target=poll_loop, daemon=True)
+        poller.start()
+
+        print(f"live console for turtle {args.id} -- type a command and press enter to "
+              "send it; ctrl-d or ctrl-c to stop")
         try:
             while True:
-                res = request(f"{url}/log?id={args.id}&after={cursor}", args.token)
-                text = res.get("text", "")
-                if text:
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
-                cursor = res.get("cursor", cursor)
-                time.sleep(1)
+                try:
+                    line = input().strip()
+                except EOFError:
+                    break
+                if not line:
+                    continue
+                try:
+                    req = urllib.request.Request(
+                        f"{url}/cmd?id={args.id}",
+                        data=json.dumps({"command": line}).encode("utf-8"),
+                        method="POST",
+                    )
+                    req.add_header("Authorization", f"Bearer {args.token}")
+                    req.add_header("Content-Type", "application/json")
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        res = json.loads(resp.read().decode("utf-8"))
+                    print(f"[queued {res['cmd_id']}]")
+                except Exception as e:
+                    print(f"[error queuing command: {e}]", file=sys.stderr)
         except KeyboardInterrupt:
             pass
+        finally:
+            stop.set()
 
 
 if __name__ == "__main__":

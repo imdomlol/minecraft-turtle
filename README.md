@@ -193,6 +193,12 @@ shipped to the relay; the relay keeps the last ~20K characters per
 turtle in memory only (not persisted to `relay_state.json`), so history
 resets on a relay restart.
 
+`console` also accepts input, not just output: type a command and press
+enter to send it (queued the same way `send` does) while still watching
+the live feed in the same terminal — a background thread handles the
+polling/printing, the foreground reads your typed lines. Ctrl-D or
+Ctrl-C to stop.
+
 ## lib/nav.lua
 
 A shared "where am I / what's around me" module, meant to be `dofile()`'d
