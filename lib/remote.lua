@@ -286,7 +286,12 @@ function M.run()
   end
 
   print("remote: connecting to " .. cfg.url)
-  local id = tostring(os.getComputerID())
+  -- A champion name (lib/identity.lua), not the raw computer ID -- IDs
+  -- are only unique within one world, and two turtles on two different
+  -- servers sharing this relay colliding on the same ID would silently
+  -- interleave their commands/results/logs into the same slot.
+  local id = dofile("/lib/identity.lua").get(cfg)
+  print("remote: identity is " .. id)
 
   term.redirect(newTeeTerm(term.current()))
 

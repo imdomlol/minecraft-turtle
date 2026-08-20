@@ -177,11 +177,12 @@ python3 server/turtlectl.py watch 12                    # stream new results
 python3 server/turtlectl.py console 12                  # live feed of the turtle's screen
 ```
 
-Turtle IDs are their CC:Tweaked computer ID (`os.getComputerID()`), shown
-by `turtlectl.py list` alongside each turtle's label and last-seen time.
-Commands are plain Lua, evaluated the same way CraftOS's own `lua` shell
-program does — bare expressions like `turtle.getFuelLevel()` print their
-return value, and `print(...)` output is captured too.
+Turtle IDs are a name assigned by `lib/identity.lua` (see below) — shown
+by `turtlectl.py list` alongside each turtle's last-seen time, and equal
+to its CraftOS label too. Commands are plain Lua, evaluated the same way
+CraftOS's own `lua` shell program does — bare expressions like
+`turtle.getFuelLevel()` print their return value, and `print(...)` output
+is captured too.
 
 `console` is different from `watch`: `watch` only shows the result of
 commands you send through the relay, while `console` mirrors everything
@@ -206,6 +207,37 @@ not only once the whole command returns — important for anything
 long-running (a `pathfind.goto()` across a big distance, say), which
 would otherwise leave the console looking dead for the entire duration
 before dumping everything at once at the end.
+
+## lib/identity.lua
+
+Assigns each turtle a stable name to identify itself to the relay with —
+`lib/remote.lua` uses this instead of the raw CC:Tweaked computer ID
+(`os.getComputerID()`). That matters because computer IDs are only
+unique *within a single world*: if more than one Minecraft server shares
+this same relay, two turtles on two different servers can easily both be
+ID 0. Since `relay.py` keys everything — the command queue, results,
+live console log — purely by that id string, two turtles colliding on it
+silently interleave into the same slot: a command meant for one can
+execute on the other, and their output mixes together. This is exactly
+what happened once already in this project.
+
+Names come from `lib/champions.lua` (League of Legends champions,
+cleaned to plain alphanumeric CamelCase so they're safe directly in a
+relay URL). On first run, a turtle GETs the relay's `/status` to see
+which names are already taken, picks a free one at random, sets it as
+both its CraftOS label (`os.setComputerLabel()`) and its relay id, and
+persists it to `/state/identity.state` — so it keeps that name across
+every future reboot rather than re-registering as a new identity (and a
+fragmented result history) each time. If the relay can't be reached yet,
+it still picks a name (best-effort, no uniqueness check) rather than
+getting stuck unable to identify itself at all.
+
+The uniqueness check is a check-then-act, not an atomic claim — two
+turtles picking their very first identity at the exact same instant
+could in principle pick the same "free" name. Not worth a real
+distributed lock for how narrow that window is (this runs once per
+turtle's lifetime, not every boot): `dofile("/lib/identity.lua").get(cfg)`
+directly if you ever need to force a re-check.
 
 ## lib/nav.lua
 
