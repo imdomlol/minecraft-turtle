@@ -346,6 +346,23 @@ is there). Like `lib/nav.lua`, this caches itself on `_G`, since
 `dofile()` (requesting a switch) must resolve to the same instance or the
 request vanishes into a copy nothing is watching.
 
+A built-in `"goto"` job is always registered, no setup needed — it exists
+so an ad-hoc long trip doesn't have to block the console the way running
+`dofile("/lib/pathfind.lua").goto(...)` as a plain command does (that
+starves the poll loop of answering *anything* else, even a quick
+`nav.report()`, until the whole trip finishes):
+
+```
+dofile("/lib/job.lua").request("goto", { x = -89, y = 70, z = -87, allowDig = true })
+```
+
+Same params as `pathfind.goto()` (`x`, `y`, `z`, `tolerance`,
+`allowDig`). Note it can't be cancelled mid-trip — `pathfind.goto()` has
+no interruption hook of its own, so `shouldStop` only matters between
+`M.run()`'s own steps, not partway through one; once started it runs to
+completion or failure like any other command would, it just no longer
+blocks the console while doing it.
+
 ## lib/home.lua
 
 Remembers a "home" position and gets back to it — pulled out of

@@ -63,6 +63,24 @@ local function shouldStop()
   return pending ~= nil
 end
 
+-- Built-in "goto" job: lets an ad-hoc trip run in the background like any
+-- other job, instead of blocking the remote console for its whole
+-- duration the way running dofile("/lib/pathfind.lua").goto(...) as a
+-- plain command does -- that starves the poll loop of answering
+-- anything else, even a quick nav.report(), until the trip finishes.
+-- Params: x, y, z, tolerance (default 0), allowDig (default false).
+-- Note: pathfind.goto() has no interruption hook of its own, so
+-- shouldStop only matters between M.run()'s own steps, not mid-trip --
+-- once started this runs to completion or failure, same as before,
+-- it's just no longer blocking anything else while it does.
+M.register("goto", function(params, _shouldStop)
+  local pathfind = dofile("/lib/pathfind.lua")
+  return pathfind.goto(params.x, params.y, params.z, {
+    tolerance = params.tolerance,
+    allowDig = params.allowDig,
+  })
+end)
+
 -- Blocks forever, running whatever job is current and switching when
 -- M.request() is called. Meant to run alongside remote.run() via
 -- parallel.waitForAny in main.lua.
