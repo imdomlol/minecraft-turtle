@@ -72,7 +72,10 @@ end
 
 local function describeInspect(found, data)
   if not found then return { present = false } end
-  return { present = true, name = data.name, state = data.state, tags = data.tags }
+  -- data.tags is omitted deliberately: on a heavily modded server it can
+  -- be hundreds of entries per block, which is noise for anything trying
+  -- to make a decision off "what block is this" (name/state cover that).
+  return { present = true, name = data.name, state = data.state }
 end
 
 function M.inspectFront() return describeInspect(turtle.inspect()) end
