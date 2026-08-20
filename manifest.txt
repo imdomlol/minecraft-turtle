@@ -9,9 +9,13 @@
 # The bootstrap updates itself. Keep this line.
 startup.lua
 
+# --- remote console ---------------------------------------------------
+lib/remote.lua
+remote-setup.lua
+main.lua
+
 # --- programs -------------------------------------------------------
 # dom-main/mining/strip.lua    -> strip.lua
 # dom-main/woodcutting/tree.lua -> tree.lua
 # dom-main/exploring/scout.lua -> scout.lua
 # lib/nav.lua
-# main.lua

@@ -1,0 +1,150 @@
+--[[----------------------------------------------------------------------
+  lib/remote.lua -- polls the relay server for commands and runs them.
+
+  Config lives in /state/remote.cfg (JSON: {url, token}), written once by
+  remote-setup.lua. /state survives startup.lua's OTA wipe, so the config
+  isn't lost on every boot/update even though this file is redeployed from
+  a public repo (the token never lives in git).
+------------------------------------------------------------------------]]
+
+local CONFIG_PATH   = "/state/remote.cfg"
+local POLL_INTERVAL = 3    -- seconds between polls when idle
+local ERROR_BACKOFF = 10   -- seconds to wait after a network/HTTP error
+
+local M = {}
+
+function M.loadConfig()
+  if not fs.exists(CONFIG_PATH) then return nil end
+  local f = fs.open(CONFIG_PATH, "r")
+  local text = f.readAll()
+  f.close()
+  local ok, cfg = pcall(textutils.unserializeJSON, text)
+  if not ok or type(cfg) ~= "table" or not cfg.url or not cfg.token then
+    return nil
+  end
+  return cfg
+end
+
+function M.saveConfig(cfg)
+  if not fs.exists("/state") then fs.makeDir("/state") end
+  local f = fs.open(CONFIG_PATH, "w")
+  f.write(textutils.serializeJSON(cfg))
+  f.close()
+end
+
+local function headers(cfg)
+  return {
+    ["Authorization"] = "Bearer " .. cfg.token,
+    ["Content-Type"]  = "application/json",
+  }
+end
+
+-- Returns decoded response, or nil + reason.
+local function post(cfg, path, body)
+  local handle, err = http.post(cfg.url .. path, textutils.serializeJSON(body), headers(cfg))
+  if not handle then return nil, tostring(err) end
+  local code = handle.getResponseCode()
+  local respBody = handle.readAll()
+  handle.close()
+  if code ~= 200 then return nil, "HTTP " .. tostring(code) end
+  local ok, decoded = pcall(textutils.unserializeJSON, respBody)
+  if not ok then return nil, "bad response json" end
+  return decoded
+end
+
+-- A minimal term-API implementation that just records what was written,
+-- so print()/write() from an executed command can be captured as plain
+-- text without touching the turtle's real screen.
+local function newCaptureTerm()
+  local buf = {}
+  local cursorY = 1
+  local t = {}
+  function t.write(text) buf[#buf + 1] = tostring(text) end
+  function t.blit(text) buf[#buf + 1] = tostring(text) end
+  function t.setCursorPos(x, y)
+    if y ~= cursorY then buf[#buf + 1] = "\n" end
+    cursorY = y
+  end
+  function t.scroll() buf[#buf + 1] = "\n" end
+  function t.getCursorPos() return 1, cursorY end
+  function t.getSize() return 51, 19 end
+  function t.clear() end
+  function t.clearLine() end
+  function t.setCursorBlink() end
+  function t.isColor() return false end
+  t.isColour = t.isColor
+  function t.getTextColor() return colors.white end
+  t.getTextColour = t.getTextColor
+  function t.setTextColor() end
+  t.setTextColour = t.setTextColor
+  function t.getBackgroundColor() return colors.black end
+  t.getBackgroundColour = t.getBackgroundColor
+  function t.setBackgroundColor() end
+  t.setBackgroundColour = t.setBackgroundColor
+  return t, buf
+end
+
+-- Runs `command` as Lua, capturing anything it prints. Returns ok, output.
+-- Bare expressions (e.g. "turtle.getFuelLevel()") are retried with an
+-- implicit "return", matching CraftOS's own `lua` shell program.
+local function execute(command)
+  local fn, loadErr = load(command, "=remote")
+  if not fn then
+    fn = load("return " .. command, "=remote")
+  end
+  if not fn then return false, "compile error: " .. tostring(loadErr) end
+
+  local capture, buf = newCaptureTerm()
+  local realTerm = term.redirect(capture)
+  local ok, result = pcall(fn)
+  term.redirect(realTerm)
+
+  local output = table.concat(buf):gsub("^%s+", ""):gsub("%s+$", "")
+
+  if not ok then
+    local msg = "error: " .. tostring(result)
+    return false, (output ~= "" and (output .. "\n" .. msg) or msg)
+  end
+  if result ~= nil then
+    output = (output ~= "" and (output .. "\n") or "") .. "= " .. tostring(result)
+  end
+  return true, output
+end
+
+-- Blocks forever, polling for and running commands. Meant to be run
+-- alongside other turtle work via parallel.waitForAny.
+function M.run()
+  if not http then
+    print("remote: http api disabled, cannot reach relay.")
+    return
+  end
+
+  local cfg = M.loadConfig()
+  if not cfg then
+    print("remote: not configured. run remote-setup.lua once.")
+    return
+  end
+
+  print("remote: connected to " .. cfg.url)
+  local id = tostring(os.getComputerID())
+
+  while true do
+    local resp, err = post(cfg, "/poll", { id = id, label = os.getComputerLabel() })
+
+    if resp and resp.command then
+      local ok, output = execute(resp.command)
+      post(cfg, "/result", {
+        id = id,
+        cmd_id = resp.cmd_id,
+        command = resp.command,
+        ok = ok,
+        output = output,
+      })
+      -- loop again immediately in case more commands are queued
+    else
+      sleep(err and ERROR_BACKOFF or POLL_INTERVAL)
+    end
+  end
+end
+
+return M
