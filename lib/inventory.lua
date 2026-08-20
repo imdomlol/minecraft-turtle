@@ -27,6 +27,34 @@ function M.isFull()
   return M.emptySlotCount() == 0
 end
 
+-- Every nonempty slot as { slot, name, count }, in slot order.
+function M.here()
+  local items = {}
+  for slot = 1, SLOTS do
+    local detail = turtle.getItemDetail(slot)
+    if detail then
+      items[#items + 1] = { slot = slot, name = detail.name, count = detail.count }
+    end
+  end
+  return items
+end
+
+-- Prints a human-readable inventory listing and returns the same data as
+-- M.here(), so it's equally useful typed interactively (incl. over the
+-- remote console) or called from a script.
+function M.report()
+  local items = M.here()
+  if #items == 0 then
+    print("inventory: empty")
+  else
+    for _, item in ipairs(items) do
+      print(("slot %2d: %3dx %s"):format(item.slot, item.count, item.name))
+    end
+  end
+  print(("%d/%d slots empty"):format(M.emptySlotCount(), SLOTS))
+  return items
+end
+
 -- Drops every nonempty slot's contents in the given direction ("front"
 -- (default), "up", or "down" -- matches lib/chestfinder.lua's returned
 -- `direction`). Returns how many slots were emptied. Restores whichever

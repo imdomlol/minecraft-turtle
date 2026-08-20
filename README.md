@@ -352,6 +352,7 @@ Inventory space/unloading helpers:
 dofile("/lib/inventory.lua").isFull()        -- true once every slot has something in it
 dofile("/lib/inventory.lua").emptySlotCount() -- how many slots are completely empty
 dofile("/lib/inventory.lua").dropAll("front") -- drop everything; "front"/"up"/"down"
+dofile("/lib/inventory.lua").report()        -- print + return what's in every slot
 ```
 
 `isFull()` counts *empty* slots, not remaining stack space — a
@@ -361,6 +362,9 @@ anywhere." `dropAll(direction)` drops every nonempty slot that way
 (matching `lib/chestfinder.lua`'s returned `direction`) and returns how
 many slots it emptied; a slot that fails to drop (destination full) is
 just left as-is — this doesn't hunt for another container or retry.
+`report()` prints a `slot: NNx name` line per nonempty slot (matching
+`lib/nav.lua`'s `report()`/`here()` split) and returns the same data as
+a plain list of `{ slot, name, count }`, for scripts to consume.
 
 ## dom-main/mining/strip.lua
 
