@@ -1,0 +1,17 @@
+# manifest.txt -- the list of files startup.lua deploys to the turtle.
+#
+# One entry per line. Paths are relative to the repo root.
+#   foo.lua                  -> written to /foo.lua on the turtle
+#   dir/foo.lua              -> written to /dir/foo.lua on the turtle
+#   dir/foo.lua -> bar.lua   -> written to /bar.lua on the turtle
+# Blank lines and lines starting with # are ignored.
+
+# The bootstrap updates itself. Keep this line.
+startup.lua
+
+# --- programs -------------------------------------------------------
+# dom-main/mining/strip.lua    -> strip.lua
+# dom-main/woodcutting/tree.lua -> tree.lua
+# dom-main/exploring/scout.lua -> scout.lua
+# lib/nav.lua
+# main.lua
