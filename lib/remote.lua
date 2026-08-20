@@ -126,20 +126,24 @@ local function newTeeTerm(real)
   return t
 end
 
--- A minimal term-API implementation that just records what was written,
--- so print()/write() from an executed command can be captured as plain
--- text without touching the turtle's real screen.
+-- A minimal term-API implementation that records what was written (for
+-- execute() to assemble the final result string) *and* mirrors it into
+-- pendingLog, so a long-running command's output streams to the live
+-- console as it happens rather than appearing all at once when it
+-- finally returns -- this term is swapped in for the whole duration of
+-- the command, so without this mirroring, appendLog never sees any of it
+-- until execute() explicitly adds the assembled result afterward.
 local function newCaptureTerm()
   local buf = {}
   local cursorY = 1
   local t = {}
-  function t.write(text) buf[#buf + 1] = tostring(text) end
-  function t.blit(text) buf[#buf + 1] = tostring(text) end
+  function t.write(text) buf[#buf + 1] = tostring(text); appendLog(tostring(text)) end
+  function t.blit(text) buf[#buf + 1] = tostring(text); appendLog(tostring(text)) end
   function t.setCursorPos(x, y)
-    if y ~= cursorY then buf[#buf + 1] = "\n" end
+    if y ~= cursorY then buf[#buf + 1] = "\n"; appendLog("\n") end
     cursorY = y
   end
-  function t.scroll() buf[#buf + 1] = "\n" end
+  function t.scroll() buf[#buf + 1] = "\n"; appendLog("\n") end
   function t.getCursorPos() return 1, cursorY end
   function t.getSize() return 51, 19 end
   function t.clear() end
@@ -184,6 +188,11 @@ local function execute(command)
     return false, msg
   end
 
+  -- Logged before running, not after: a long-running command (a job's
+  -- pathfind trip, say) would otherwise leave the live console dark for
+  -- its entire duration with no indication anything was even received.
+  appendLog("> " .. command .. "\n")
+
   local capture, buf = newCaptureTerm()
   local realTerm = term.redirect(capture)
   local n, results = packAll(pcall(fn))
@@ -192,22 +201,25 @@ local function execute(command)
   local ok = results[1]
   local output = table.concat(buf):gsub("^%s+", ""):gsub("%s+$", "")
 
+  -- The error/return-value suffix below is computed from pcall's results
+  -- after the fact -- it was never turtle.print()'d through the capture
+  -- term, so (unlike the rest of `output`) it needs its own explicit
+  -- appendLog to actually reach the live console.
+  local suffix
   if not ok then
-    local msg = "error: " .. tostring(results[2])
-    output = (output ~= "" and (output .. "\n" .. msg) or msg)
+    suffix = "error: " .. tostring(results[2])
+    output = (output ~= "" and (output .. "\n" .. suffix) or suffix)
   elseif n > 1 then
     local parts = {}
     for i = 2, n do
       local v = results[i]
       parts[#parts + 1] = type(v) == "table" and textutils.serialize(v) or tostring(v)
     end
-    output = (output ~= "" and (output .. "\n") or "") .. "= " .. table.concat(parts, ", ")
+    suffix = "= " .. table.concat(parts, ", ")
+    output = (output ~= "" and (output .. "\n") or "") .. suffix
   end
+  if suffix then appendLog(suffix .. "\n") end
 
-  -- Command output is captured on a term that's swapped away from the tee
-  -- while it runs, so it never reaches pendingLog on its own -- add it
-  -- explicitly so the live console feed shows commands as they execute.
-  appendLog("> " .. command .. "\n" .. output .. "\n")
   return ok, output
 end
 

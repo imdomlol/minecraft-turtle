@@ -21,6 +21,13 @@ import time
 import urllib.error
 import urllib.request
 
+try:
+    import readline  # noqa: F401 -- importing this enables input()'s up/down-arrow
+    # history and left/right line editing on POSIX; not available on Windows,
+    # where `console` still works, just without that.
+except ImportError:
+    pass
+
 
 def request(url, token, method="GET", body=None):
     data = json.dumps(body).encode("utf-8") if body is not None else None

@@ -197,7 +197,15 @@ resets on a relay restart.
 enter to send it (queued the same way `send` does) while still watching
 the live feed in the same terminal — a background thread handles the
 polling/printing, the foreground reads your typed lines. Ctrl-D or
-Ctrl-C to stop.
+Ctrl-C to stop. Up/down arrows cycle through previously typed lines
+within that session (via Python's `readline`, POSIX only).
+
+A command's own progress streams live too, not just the final result:
+`lib/remote.lua` mirrors whatever a command `print()`s as it happens,
+not only once the whole command returns — important for anything
+long-running (a `pathfind.goto()` across a big distance, say), which
+would otherwise leave the console looking dead for the entire duration
+before dumping everything at once at the end.
 
 ## lib/nav.lua
 
@@ -454,6 +462,17 @@ the horizontal-shaft `strip.lua`. Travel *between* columns, over
 already-surveyed ground, also uses `pathfind.goto()` with `allowDig =
 true` — so a stray surface obstacle can't stall an unattended run; edit
 the file if you'd rather it stop and wait instead.
+
+Real bedrock near the world floor is patchy, not a clean plane, and is
+undiggable regardless of `allowDig` — so the horizontal repositioning
+above can fail at the exact depth a column stopped at, even though the
+same move would succeed a few blocks higher (above the pocket, where the
+leg that was just dug already opened things up). Rather than give up on
+the first failure, it climbs one block and retries, repeating until it
+either succeeds or has climbed all the way to the column's own start
+height with no success — at which point something other than a shallow
+bedrock pocket is blocking it, and it stops with a clear reason instead
+of getting stuck in place.
 
 Checks its inventory (`lib/inventory.lua`) once per column boundary — the
 same granularity as the `shouldStop` check, for the same reason. If full,

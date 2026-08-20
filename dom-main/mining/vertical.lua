@@ -138,17 +138,38 @@ local function digColumn(legLength, descend, shouldStop)
   end
 end
 
--- Gets back under columnStart's (x, z) at the current depth -- digging
--- through anything in the way, since most of it is already opened up by
--- the column's own legs -- then digs straight up to columnStart's y.
+-- Gets back under columnStart's (x, z) -- digging through anything in
+-- the way, since most of it is already opened up by the column's own
+-- legs -- then digs straight up to columnStart's y.
+--
+-- Real bedrock near the world floor is patchy, not a clean plane, and is
+-- undiggable no matter what allowDig says -- so the direct horizontal
+-- repositioning attempt (at the depth digColumn() stopped at) can fail
+-- even though the same move would work a few blocks higher, above the
+-- bedrock pocket. Rather than give up on the first failure, climb one
+-- block and retry, repeating until it succeeds or there's nowhere higher
+-- left to try (climbing all the way to columnStart.y without success
+-- means something other than a shallow bedrock pocket is blocking it).
 local function returnToColumnStart(columnStart)
   local pos = nav.getPosition()
-  local reached, info = pathfind.goto(columnStart.x, pos.y, columnStart.z, { tolerance = 0, allowDig = true })
-  if not reached then
-    return false, "could not get under column start: " .. tostring(info.reason)
+
+  while true do
+    local reached, info = pathfind.goto(columnStart.x, pos.y, columnStart.z, { tolerance = 0, allowDig = true })
+    if reached then break end
+
+    if pos.y >= columnStart.y then
+      return false, "could not get under column start even at the top: " .. tostring(info.reason)
+    end
+
+    local climbed = tunnelUp(1)
+    if climbed == 0 then
+      return false, "stuck climbing to retry after: " .. tostring(info.reason)
+    end
+    pos = nav.getPosition()
   end
 
-  local needed = columnStart.y - nav.getPosition().y
+  pos = nav.getPosition()
+  local needed = columnStart.y - pos.y
   local climbed = tunnelUp(needed)
   if climbed < needed then
     return false, "stuck climbing back to column start"
