@@ -96,12 +96,16 @@ local function newCaptureTerm()
 end
 
 -- Runs `command` as Lua, capturing anything it prints. Returns ok, output.
--- Bare expressions (e.g. "turtle.getFuelLevel()") are retried with an
--- implicit "return", matching CraftOS's own `lua` shell program.
+-- Tries an implicit "return" first, same as CraftOS's own `lua` shell
+-- program, so a bare call like "turtle.getFuelLevel()" reports its
+-- return value instead of silently discarding it as a statement. Falls
+-- back to the raw parse for genuine statements ("for i=1,3 do ... end")
+-- that don't compile with "return" in front.
 local function execute(command)
-  local fn, loadErr = load(command, "=remote")
+  local fn = load("return " .. command, "=remote")
+  local loadErr
   if not fn then
-    fn = load("return " .. command, "=remote")
+    fn, loadErr = load(command, "=remote")
   end
   if not fn then return false, "compile error: " .. tostring(loadErr) end
 
