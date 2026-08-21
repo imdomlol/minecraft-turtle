@@ -136,6 +136,16 @@ end
 -- opts.full (default false) additionally spins the turtle to survey all
 -- 6 neighboring blocks (north/east/south/west/up/down) instead of just
 -- front/up/down -- see surroundings() above.
+--
+-- front/up/down are always their own fresh inspect() calls, even when
+-- opts.full also inspects those same directions via around -- reusing
+-- the same table object in two places here (info.front = info.around.x,
+-- say) would make front and around.x the *same* table, and CC:Tweaked's
+-- textutils.serialize() (used by lib/remote.lua to format command
+-- results) refuses to serialize a table that references the same
+-- sub-table from more than one place ("Cannot serialize table with
+-- repeated entries"). A few extra inspect() calls are cheap; that error
+-- reaching an operator mid-command is not worth avoiding them for.
 function M.here(opts)
   init()
   local info = {
@@ -144,16 +154,12 @@ function M.here(opts)
     facing = HEADINGS[state.heading + 1],
     gpsFixed = state.source ~= "relative",
     source = state.source,
+    front = M.inspectFront(),
+    up = M.inspectUp(),
+    down = M.inspectDown(),
   }
   if opts and opts.full then
     info.around = surroundings()
-    info.front = info.around[info.facing]
-    info.up = info.around.up
-    info.down = info.around.down
-  else
-    info.front = M.inspectFront()
-    info.up = M.inspectUp()
-    info.down = M.inspectDown()
   end
   return info
 end
