@@ -6,9 +6,16 @@
   functions). So this is a greedy stepper, not A*: every step it picks
   whichever axis (x, z, or y) has the largest remaining distance and
   tries to move that way, falling back to the other axes if that move
-  fails. Optionally digs/attacks through whatever's blocking it. Bounded
-  by a step cap (a multiple of the starting distance) so a genuinely
-  boxed-in turtle gives up instead of looping forever.
+  fails. Optionally digs/attacks through whatever's blocking it -- except
+  liquids (lib/nav.lua's isLiquid()), which it never digs, since a turtle
+  can already move straight through one. If every axis that would make
+  progress toward the target is blocked, it falls back further still to
+  whatever's left -- including backtracking -- since a turtle boxed in on
+  every useful side (bedrock is undiggable regardless of allowDig) can
+  often still find a way around by momentarily moving away from the
+  target, same as a person would. Bounded by a step cap (a multiple of
+  the starting distance) so a genuinely dead-ended turtle gives up
+  instead of looping forever.
 
   Depends on lib/nav.lua for position tracking, so the same rule applies:
   reaching the target only works if nothing else moves this turtle
@@ -27,12 +34,18 @@ end
 
 -- "Movement obstructed" covers both blocks and entities in CC:Tweaked, so
 -- try both dig and attack -- whichever one actually applies just no-ops.
+-- Liquids (see nav.isLiquid()) never get dug -- there's nothing to break,
+-- and a turtle can already move straight through one -- so this skips
+-- straight to retrying the move instead of wasting a dig attempt on it.
 local function stepForward(allowDig)
   local ok, err = nav.forward()
   if ok then return true end
   if allowDig then
-    turtle.dig()
-    turtle.attack()
+    local found, data = turtle.inspect()
+    if not (found and nav.isLiquid(data.name)) then
+      turtle.dig()
+      turtle.attack()
+    end
     ok, err = nav.forward()
     if ok then return true end
   end
@@ -43,8 +56,11 @@ local function stepUp(allowDig)
   local ok, err = nav.up()
   if ok then return true end
   if allowDig then
-    turtle.digUp()
-    turtle.attackUp()
+    local found, data = turtle.inspectUp()
+    if not (found and nav.isLiquid(data.name)) then
+      turtle.digUp()
+      turtle.attackUp()
+    end
     ok, err = nav.up()
     if ok then return true end
   end
@@ -55,8 +71,11 @@ local function stepDown(allowDig)
   local ok, err = nav.down()
   if ok then return true end
   if allowDig then
-    turtle.digDown()
-    turtle.attackDown()
+    local found, data = turtle.inspectDown()
+    if not (found and nav.isLiquid(data.name)) then
+      turtle.digDown()
+      turtle.attackDown()
+    end
     ok, err = nav.down()
     if ok then return true end
   end
@@ -66,41 +85,85 @@ end
 local HEADING_FOR_DX = { [1] = 1, [-1] = 3 } -- +x -> east, -x -> west
 local HEADING_FOR_DZ = { [1] = 2, [-1] = 0 } -- +z -> south, -z -> north
 
+local function moveX(sign, allowDig)
+  nav.face(HEADING_FOR_DX[sign])
+  return stepForward(allowDig)
+end
+
+local function moveZ(sign, allowDig)
+  nav.face(HEADING_FOR_DZ[sign])
+  return stepForward(allowDig)
+end
+
+local function moveY(sign, allowDig)
+  if sign > 0 then return stepUp(allowDig) end
+  return stepDown(allowDig)
+end
+
 -- Tries every direction that would make progress this step, biggest
 -- remaining-distance axis first, falling through to the others if the
--- preferred one fails. Returns true and which axis moved, or false and
--- the most recent error if nothing worked.
+-- preferred one fails -- then, if *all* of those are blocked, falls back
+-- to trying whatever's left: the opposite way along any axis just tried,
+-- plus both ways on any axis that didn't need trying at all (already
+-- aligned with the target on it). A turtle boxed in by bedrock on every
+-- side that would make direct progress can still often find a way around
+-- by backtracking or sidestepping first, the same as a person would --
+-- even though that step alone moves further from the target, tryOneStep
+-- runs fresh again next step, so the normal toward-target logic just
+-- resumes correcting course from wherever it lands. Returns true and
+-- which axis moved ("x"/"z"/"y" toward the target, or "escape" for a
+-- fallback move), or false and the most recent error if nothing at all
+-- worked.
 local function tryOneStep(target, allowDig)
   local pos = nav.getPosition()
   local dx, dy, dz = target.x - pos.x, target.y - pos.y, target.z - pos.z
 
-  local candidates = {}
+  local toward = {}
   if dx ~= 0 then
-    candidates[#candidates + 1] = { axis = "x", amount = math.abs(dx), fn = function()
-      nav.face(HEADING_FOR_DX[dx > 0 and 1 or -1])
-      return stepForward(allowDig)
-    end }
+    toward[#toward + 1] = { axis = "x", amount = math.abs(dx), fn = function() return moveX(dx > 0 and 1 or -1, allowDig) end }
   end
   if dz ~= 0 then
-    candidates[#candidates + 1] = { axis = "z", amount = math.abs(dz), fn = function()
-      nav.face(HEADING_FOR_DZ[dz > 0 and 1 or -1])
-      return stepForward(allowDig)
-    end }
+    toward[#toward + 1] = { axis = "z", amount = math.abs(dz), fn = function() return moveZ(dz > 0 and 1 or -1, allowDig) end }
   end
-  if dy > 0 then
-    candidates[#candidates + 1] = { axis = "y", amount = dy, fn = function() return stepUp(allowDig) end }
-  elseif dy < 0 then
-    candidates[#candidates + 1] = { axis = "y", amount = -dy, fn = function() return stepDown(allowDig) end }
+  if dy ~= 0 then
+    toward[#toward + 1] = { axis = "y", amount = math.abs(dy), fn = function() return moveY(dy > 0 and 1 or -1, allowDig) end }
   end
 
-  table.sort(candidates, function(a, b) return a.amount > b.amount end)
+  table.sort(toward, function(a, b) return a.amount > b.amount end)
 
   local lastErr
-  for _, c in ipairs(candidates) do
+  for _, c in ipairs(toward) do
     local ok, err = c.fn()
     if ok then return true, c.axis end
     lastErr = err
   end
+
+  local escape = {}
+  if dx ~= 0 then
+    escape[#escape + 1] = function() return moveX(dx > 0 and -1 or 1, allowDig) end
+  else
+    escape[#escape + 1] = function() return moveX(1, allowDig) end
+    escape[#escape + 1] = function() return moveX(-1, allowDig) end
+  end
+  if dz ~= 0 then
+    escape[#escape + 1] = function() return moveZ(dz > 0 and -1 or 1, allowDig) end
+  else
+    escape[#escape + 1] = function() return moveZ(1, allowDig) end
+    escape[#escape + 1] = function() return moveZ(-1, allowDig) end
+  end
+  if dy ~= 0 then
+    escape[#escape + 1] = function() return moveY(dy > 0 and -1 or 1, allowDig) end
+  else
+    escape[#escape + 1] = function() return moveY(1, allowDig) end
+    escape[#escape + 1] = function() return moveY(-1, allowDig) end
+  end
+
+  for _, fn in ipairs(escape) do
+    local ok, err = fn()
+    if ok then return true, "escape" end
+    lastErr = err
+  end
+
   return false, nil, lastErr
 end
 
@@ -114,9 +177,10 @@ end
 -- block the console for its entire duration with no way to call it off).
 --
 -- Returns ok, info where info = { reason, distance, position }. reason
--- is "arrived", "stuck: <error>" (every axis failed with nothing left to
--- try), "interrupted" (shouldStop() returned true), or "gave up: too
--- many steps" (safety cap hit).
+-- is "arrived", "stuck: <error>" (every direction failed, including the
+-- escape fallback -- genuinely boxed in on all sides), "interrupted"
+-- (shouldStop() returned true), or "gave up: too many steps" (safety cap
+-- hit, e.g. repeatedly backtracking without a real way through).
 function M.goto(x, y, z, opts)
   opts = opts or {}
   local tolerance = opts.tolerance or 0

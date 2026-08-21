@@ -114,6 +114,16 @@ function M.inspectFront() return describeInspect(turtle.inspect()) end
 function M.inspectUp() return describeInspect(turtle.inspectUp()) end
 function M.inspectDown() return describeInspect(turtle.inspectDown()) end
 
+-- Water and lava aren't solid -- a turtle can move straight through
+-- either one (and takes no damage from lava) without digging first.
+-- Digging one does nothing useful anyway (there's no block to break),
+-- so anything that dig-then-moves should check this first and skip
+-- straight to moving if it's true, rather than wasting a dig attempt.
+function M.isLiquid(name)
+  if not name then return false end
+  return name:find("water") ~= nil or name:find("lava") ~= nil
+end
+
 -- Spins through all 4 compass headings -- exactly 4 turnRight()s, so it
 -- always ends up back at the heading it started with -- inspecting front
 -- at each one, plus up/down: the full 6-block "shell" around the turtle,

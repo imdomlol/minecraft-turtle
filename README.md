@@ -344,6 +344,14 @@ else — it's on you to get the reading right, since nothing re-verifies it.
 direction regardless of which way the turtle happened to be facing when
 the job started.
 
+`nav.isLiquid(name)` — is a block name water or lava. Fluids aren't
+solid, so a turtle can already move straight through either one (and
+takes no lava damage) without digging first, and digging one does
+nothing useful anyway (there's no block to break). Used by
+`lib/pathfind.lua` and `dom-main/mining/vertical.lua` to skip straight to
+moving instead of wasting a dig attempt whenever the thing in the way
+turns out to be a liquid.
+
 ## lib/pathfind.lua
 
 Moves the turtle toward a target position, digging/attacking through
@@ -368,15 +376,32 @@ There's no map to plan a real route against — a turtle only ever sees
 the block immediately touching it, not the wider world — so this isn't
 A*. It's a greedy stepper: each step it picks whichever axis (x, z, or y)
 has the largest remaining distance and tries to move that way, falling
-back to the other axes if that fails. If every axis fails, or it's taken
-more than roughly 4x the starting distance in steps without arriving, it
-gives up rather than looping forever. Returns `ok, info` where
-`info.reason` is `"arrived"`, `"stuck: <error>"`, `"interrupted"`
-(`shouldStop()` returned true), or `"gave up: too many steps"`, alongside
-the final `distance` and `position`. Builds on `lib/nav.lua`, so the same
-rule applies — the tracked position (and thus this whole feature) only
-stays accurate if nothing moves the turtle outside of `nav`/`pathfind`
-mid-trip.
+back to the other axes if that fails. Liquids (`lib/nav.lua`'s
+`isLiquid()`) are never dug regardless of `allowDig` — there's nothing to
+break, and a turtle can already move straight through one — so hitting a
+liquid just moves through it instead of wasting a dig attempt.
+
+**If every axis that would make progress toward the target is blocked
+too** (undiggable bedrock, say), it falls back further still to
+whichever directions are left — including moving *away* from the target
+— since a turtle boxed in by bedrock on every useful side can often
+still find a way around by backtracking or sidestepping first, the same
+as a person would, even though that step alone moves further from the
+target. This runs fresh again every step, so normal toward-target
+stepping resumes correcting course the moment it's possible again. Only
+if *that* also fails — every direction in every axis is blocked — does
+it finally give up, alongside taking more than roughly 4x the starting
+distance in steps without arriving (this cap also bounds a turtle that
+keeps finding an escape but never a real way through, e.g. repeatedly
+backtracking between two dead-end pockets).
+
+Returns `ok, info` where `info.reason` is `"arrived"`, `"stuck: <error>"`
+(every direction failed, including the escape fallback — genuinely boxed
+in), `"interrupted"` (`shouldStop()` returned true), or `"gave up: too
+many steps"`, alongside the final `distance` and `position`. Builds on
+`lib/nav.lua`, so the same rule applies — the tracked position (and thus
+this whole feature) only stays accurate if nothing moves the turtle
+outside of `nav`/`pathfind` mid-trip.
 
 `lib/nav.lua` (and `lib/pathfind.lua` itself) cache themselves on `_G`
 the first time any script `dofile()`s them, so `pathfind.lua`'s own
@@ -629,7 +654,12 @@ the first failure, it climbs one block and retries, repeating until it
 either succeeds or has climbed all the way to the pass's own start
 height with no success — at which point something other than a shallow
 bedrock pocket is blocking it, and it stops with a clear reason instead
-of getting stuck in place.
+of getting stuck in place. This composes with `pathfind.goto()`'s own
+escape fallback (see above) — the climb-and-retry here handles a bedrock
+pocket blocking the way *up*, while pathfind's own fallback handles
+bedrock blocking the way *across* at a given depth, backtracking or
+sidestepping around it before this loop even needs to try a different
+height.
 
 Checks its fuel and inventory (`lib/inventory.lua`) once per pass, before
 it starts — so twice per width position under `lengthFacing = "all"`. If

@@ -278,9 +278,16 @@ local function scanSides(pos, thorough)
   return seeds
 end
 
+-- Liquids (see lib/nav.lua's isLiquid()) never get dug -- there's
+-- nothing to break, and a turtle can already move straight through one
+-- -- so this skips straight to moving instead of wasting a dig attempt.
+local function isLiquidAhead(found, data)
+  return found and nav.isLiquid(data.name)
+end
+
 local function digForward(observant, thorough, shouldStop)
   for _ = 1, MAX_DIG_ATTEMPTS do
-    if not turtle.detect() then
+    if not turtle.detect() or isLiquidAhead(turtle.inspect()) then
       local ok, err = nav.forward()
       if ok and observant then
         local seeds = scanSides(nav.getPosition(), thorough)
@@ -297,7 +304,7 @@ end
 
 local function digDown()
   for _ = 1, MAX_DIG_ATTEMPTS do
-    if not turtle.detectDown() then return nav.down() end
+    if not turtle.detectDown() or isLiquidAhead(turtle.inspectDown()) then return nav.down() end
     if not turtle.digDown() then turtle.attackDown() end
   end
   return false, "obstructed after " .. MAX_DIG_ATTEMPTS .. " dig attempts"
@@ -305,7 +312,7 @@ end
 
 local function digUp()
   for _ = 1, MAX_DIG_ATTEMPTS do
-    if not turtle.detectUp() then return nav.up() end
+    if not turtle.detectUp() or isLiquidAhead(turtle.inspectUp()) then return nav.up() end
     if not turtle.digUp() then turtle.attackUp() end
   end
   return false, "obstructed after " .. MAX_DIG_ATTEMPTS .. " dig attempts"
