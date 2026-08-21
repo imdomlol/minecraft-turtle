@@ -25,16 +25,6 @@ local function dist(dx, dy, dz)
   return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
--- Turns to face `heading` (0-3) using the fewest turns.
-local function faceHeading(heading)
-  local pos = nav.getPosition()
-  local diff = (heading - pos.heading) % 4
-  if diff == 1 then nav.turnRight()
-  elseif diff == 3 then nav.turnLeft()
-  elseif diff == 2 then nav.turnRight(); nav.turnRight()
-  end
-end
-
 -- "Movement obstructed" covers both blocks and entities in CC:Tweaked, so
 -- try both dig and attack -- whichever one actually applies just no-ops.
 local function stepForward(allowDig)
@@ -87,13 +77,13 @@ local function tryOneStep(target, allowDig)
   local candidates = {}
   if dx ~= 0 then
     candidates[#candidates + 1] = { axis = "x", amount = math.abs(dx), fn = function()
-      faceHeading(HEADING_FOR_DX[dx > 0 and 1 or -1])
+      nav.face(HEADING_FOR_DX[dx > 0 and 1 or -1])
       return stepForward(allowDig)
     end }
   end
   if dz ~= 0 then
     candidates[#candidates + 1] = { axis = "z", amount = math.abs(dz), fn = function()
-      faceHeading(HEADING_FOR_DZ[dz > 0 and 1 or -1])
+      nav.face(HEADING_FOR_DZ[dz > 0 and 1 or -1])
       return stepForward(allowDig)
     end }
   end

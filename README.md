@@ -217,21 +217,33 @@ job (`request`/`stop`) versus a plain call. `turtlectl.py` has shortcuts
 that build the right command for you:
 
 ```
-python3 server/turtlectl.py goto Lux -89 55 -87 --dig       # background job, cancellable
-python3 server/turtlectl.py mine Lux --leg 12 --descend 4   # any omitted flag keeps its default
-python3 server/turtlectl.py stop Lux                        # stop the running job, back to idle
+python3 server/turtlectl.py goto Lux -89 55 -87 --dig          # background job, cancellable
+python3 server/turtlectl.py mine Lux --facing west --leg 12    # any omitted flag keeps its default
+python3 server/turtlectl.py mine Lux --no-tidy --no-observant  # --tidy/--observant/--thorough, all default true
+python3 server/turtlectl.py stop Lux                           # stop the running job, back to idle
 python3 server/turtlectl.py jobstatus Lux
 python3 server/turtlectl.py pos Lux
+python3 server/turtlectl.py pos Lux --full                      # spin to see all 6 surrounding blocks
+python3 server/turtlectl.py setpos Lux -89 70 -87 west          # manual calibration, e.g. after an F3 check
+python3 server/turtlectl.py turnleft Lux
+python3 server/turtlectl.py turnright Lux
 python3 server/turtlectl.py inv Lux
 python3 server/turtlectl.py home Lux --dig
 python3 server/turtlectl.py markhome Lux
-python3 server/turtlectl.py findchest Lux --radius 12        # or --x/--y/--z to search elsewhere
+python3 server/turtlectl.py findchest Lux --radius 12           # or --x/--y/--z to search elsewhere
 ```
 
 Every shortcut above also takes `--wait` (block and print the result once
 it completes — no separate `results`/`console` lookup for a quick check)
 and `--wait-timeout` (seconds, default 120). `--help` on any of them
 lists its flags, e.g. `turtlectl.py goto --help`.
+
+The same shortcuts (minus `<id>`, already implied, and `--wait`, pointless
+when you're already watching the live feed) work typed directly into an
+active `console <id>` session too, e.g. `goto -89 55 -87 --dig` or `mine
+--facing west --leg 12`. Anything whose first word isn't a shortcut name
+is sent through unchanged, as raw Lua. Type `help` in a console session to
+list them all without leaving it.
 
 ## lib/identity.lua
 
@@ -281,7 +293,26 @@ down:  minecraft:dirt
 ```
 
 `nav.here()` returns the same data as a plain table instead of printing
-it, for scripts to consume programmatically. Position is anchored to a
+it, for scripts to consume programmatically. Both take an optional
+`opts.full` — spin through all 4 compass headings (exactly 4
+`turnRight()`s, so it always ends back at the original heading) plus
+up/down, surveying the full 6-block "shell" around the turtle instead of
+just whichever way it happens to be facing:
+
+```
+dofile("/lib/nav.lua").report({ full = true })
+```
+```
+pos: (1, 0, -2)  facing: east  [relative, no GPS fix]
+north: minecraft:stone
+east:  minecraft:stone
+south: air/none
+west:  minecraft:coal_ore
+up:    air/none
+down:  minecraft:dirt
+```
+
+Position is anchored to a
 real GPS fix if a GPS satellite network is reachable in-world the first
 time a turtle uses it, otherwise it's relative to wherever the turtle
 was when tracking began (0,0,0) — `gpsFixed` in the returned table tells
@@ -304,6 +335,13 @@ dofile("/lib/nav.lua").setPosition(-1358, 61, -4337, "west")
 (`source` in the returned table is `"gps"`, `"manual"`, or `"relative"`),
 but treated the same as an absolute, trustworthy position everywhere
 else — it's on you to get the reading right, since nothing re-verifies it.
+
+`nav.face(facing)` turns to a given heading (same `facing` format as
+`setPosition` above) using the fewest turns — at most one `turnLeft`,
+`turnRight`, or 180. Used by `lib/pathfind.lua`'s own stepping and by
+`dom-main/mining/vertical.lua` to orient itself for a chosen mining
+direction regardless of which way the turtle happened to be facing when
+the job started.
 
 ## lib/pathfind.lua
 
@@ -510,34 +548,37 @@ permanently block the remote console:
 
 ```
 dofile("/lib/job.lua").request("mine_vertical", {
-  legLength = 10, descend = 3, minFuel = 500, columnDZ = 1, columnDY = 1,
+  facing = "north", legLength = 10, descend = 3, minFuel = 500, columnStep = 1, columnDY = 1,
 })
 dofile("/lib/job.lua").stop()
 ```
 
+- `facing` (default `"north"`): compass name for the direction the whole
+  operation advances in over time as it starts new columns — this is the
+  *marching* direction, not the legs' own dig direction. Must be one of
+  `"north"`/`"east"`/`"south"`/`"west"`; anything else fails the job
+  immediately with a clear error rather than doing something unexpected.
 - `legLength` (default 10): blocks dug per forward/backward leg.
 - `descend` (default 3): blocks descended before each leg.
 - `minFuel` (default 500): stops before starting a new column if fuel
   can't be brought above this.
-- `columnDZ` (default 1): z shift applied to each new column, relative
-  to the previous one. x never changes.
+- `columnStep` (default 1): blocks each new column advances, in the
+  `facing` direction, from the previous one.
 - `columnDY` (default 1): magnitude of the *starting height* shift each
-  new column; sign alternates every column, so columns march steadily in
-  z at a fixed x, staggered up/down by 1 around the original height
-  rather than all starting at the same y. That stagger means adjacent
-  columns' horizontal legs also land at different depths instead of
-  perfectly overlapping.
+  new column; sign alternates every column, so columns march steadily
+  outward in the `facing` direction, staggered up/down by 1 around the
+  original height rather than all starting at the same y. That stagger
+  means adjacent columns' horizontal legs also land at different depths
+  instead of perfectly overlapping.
 
-The marching axis (z) is deliberately perpendicular to the legs'
-forward/back axis (x, assuming the turtle is facing east or west when
-the job starts — see below): marching along x too would just walk new
-columns down the same line the legs already dug, instead of spreading
-into fresh rock. **This assumes a specific starting orientation** —
-`digColumn`'s legs run along whichever horizontal axis the turtle happens
-to be facing when the job starts (its very first move is a `descend`,
-which doesn't turn it), so marching in z only avoids overlap if that
-start facing is east or west. Face the turtle east or west before
-starting the job if you're relying on the default `columnDZ`.
+The legs' own forward/back axis is always perpendicular to the marching
+direction: marching parallel to the legs would just walk new columns down
+the same line the legs already dug, instead of spreading into fresh rock.
+`M.run()` turns to face the right perpendicular itself, once, right at
+the start (via `nav.face()`), so **no particular starting orientation is
+required** — whatever the turtle happens to be facing when the job
+starts is irrelevant; only `facing` (the parameter) decides which way the
+mine actually spreads.
 
 The climb back up deliberately doesn't retrace the zigzag turn by turn —
 it just repositions horizontally (via `pathfind.goto()`, `allowDig =
@@ -560,12 +601,45 @@ bedrock pocket is blocking it, and it stops with a clear reason instead
 of getting stuck in place.
 
 Checks its inventory (`lib/inventory.lua`) once per column boundary — the
-same granularity as the `shouldStop` check, for the same reason. If full,
-it finds a chest (`lib/chestfinder.lua`, defaulting to `lib/home.lua`'s
-position), drops everything in, and returns to the column it was working
-on before continuing. If no chest can be found, or the one found can't
-take everything, mining stops with a clear reason rather than discarding
-items or looping forever hunting for space.
+same granularity as the `shouldStop` check, for the same reason. If full
+and `tidy` (see below) is true, it finds a chest (`lib/chestfinder.lua`,
+defaulting to `lib/home.lua`'s position), drops everything in, and
+returns to the column it was working on before continuing. If no chest
+can be found, or the one found can't take everything, or `tidy` is
+false, mining stops with a clear reason rather than discarding items or
+looping forever hunting for space.
+
+Three optional boolean modes, all default `true`:
+
+- `tidy`: the auto-unload-into-a-chest behavior described above.
+  `tidy = false` skips the chest hunt entirely and just stops the job the
+  moment the inventory's full, for when no chest is set up nearby or
+  you'd rather manage unloading by hand.
+- `observant`: after every successful forward leg step, turns to peek at
+  the block immediately to the left and right before turning back
+  straight (four extra turns per step) and prints anything notable it
+  sees. Purely a sensing behavior, deliberately scoped to horizontal leg
+  movement only (not `descend`) — that's the only place "left/right"
+  means anything as the turtle moves.
+- `thorough`: chases down veins of anything `observant` spots (any block
+  name matching `..._ore$`, plus `ancient_debris` — broad on purpose, so
+  a modded server's ore naming mostly gets picked up too) instead of
+  leaving it for a neighboring leg or column to maybe stumble into later.
+  **`thorough` only ever acts on what `observant` finds**, so it has no
+  effect with `observant = false` — it doesn't separately re-inspect the
+  block a leg is about to dig through, since by the time a vein is
+  spotted that way the turtle's already committed to consuming it as a
+  normal part of the leg. When it does trigger, it flood-fills outward
+  through connected valuable neighbors (BFS over each newly-mined
+  block's own 6 neighbors, moving to and digging through each one via
+  `pathfind.goto()`'s `allowDig`), capped at 48 blocks so a huge or
+  misidentified "vein" (an exposed ore-heavy cave wall, say) can't turn
+  into an unbounded side quest. `shouldStop` is honored between targets
+  while chasing (never mid-step) — but, like the climb back to a
+  column's own top below, the *final* return to the exact
+  position/heading the detour started from is not interruptible and
+  always happens regardless of how the search ended, since the leg's own
+  step-accounting depends on landing back exactly where it left off.
 
 `shouldStop` reaches `pathfind.goto()`'s per-step check for the travel
 *to the next column* (interrupting that is safe — it's the start of new

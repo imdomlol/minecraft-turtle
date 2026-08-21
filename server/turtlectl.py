@@ -14,10 +14,15 @@ Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
 jobs vs plain calls -- these build the right dofile(...) command for you:
   turtlectl.py goto <id> <x> <y> <z> [--tolerance N] [--dig]
-  turtlectl.py mine <id> [--leg N] [--descend N] [--min-fuel N] [--column-dz N] [--column-dy N]
+  turtlectl.py mine <id> [--facing north|east|south|west] [--leg N] [--descend N]
+                         [--min-fuel N] [--column-step N] [--column-dy N]
+                         [--no-tidy] [--no-observant] [--no-thorough]
   turtlectl.py stop <id>              -- stop the running job, back to idle
   turtlectl.py jobstatus <id>
-  turtlectl.py pos <id>
+  turtlectl.py pos <id> [--full]                 -- --full spins to see all 6 surrounding blocks
+  turtlectl.py setpos <id> <x> <y> <z> <facing>  -- manual calibration (facing: 0-3 or compass name)
+  turtlectl.py turnleft <id>
+  turtlectl.py turnright <id>
   turtlectl.py inv <id>
   turtlectl.py home <id> [--dig]      -- go to the marked home position
   turtlectl.py markhome <id>          -- mark the current position as home
@@ -27,11 +32,18 @@ All of the above accept --wait (and --wait-timeout, default 120s) to
 block and print the result once it completes, instead of just queuing
 it -- handy for a quick check without a separate `results`/`console` look.
 
+The same shortcuts (minus <id>, which is already implied, and --wait,
+which is pointless when you're already watching the live feed) also work
+typed directly into an active `console` session, e.g. `goto -89 55 -87
+--dig` or `mine --leg 12`. Anything whose first word isn't a shortcut
+name is sent through unchanged, as raw Lua, same as before.
+
 Reads RELAY_URL and RELAY_TOKEN from the environment; --url/--token override.
 """
 import argparse
 import json
 import os
+import shlex
 import sys
 import threading
 import time
@@ -98,6 +110,190 @@ def lua_bool(b):
     return "true" if b else "false"
 
 
+def facing_lua(facing):
+    """facing is either a heading number (0-3) or a compass name -- pass
+    numbers through bare, quote everything else so Lua sees a string."""
+    if facing.lstrip("-").isdigit():
+        return facing
+    return f'"{facing}"'
+
+
+# Shared by both the top-level `turtlectl.py goto ...` subcommand and a
+# `goto ...` line typed into an active `console` session -- ns just needs
+# the same attribute names in both cases (see build_console_parser()
+# below, whose subparsers mirror main()'s). Returns (description, lua).
+def build_shortcut(cmd, ns):
+    if cmd == "goto":
+        command = (
+            'dofile("/lib/job.lua").request("goto", { '
+            f'x = {ns.x}, y = {ns.y}, z = {ns.z}, '
+            f'tolerance = {ns.tolerance}, allowDig = {lua_bool(ns.dig)} }})'
+        )
+        return f"goto ({ns.x}, {ns.y}, {ns.z}) tolerance={ns.tolerance} dig={ns.dig}", command
+
+    if cmd == "mine":
+        fields = []
+        if ns.facing is not None: fields.append(f'facing = "{ns.facing}"')
+        if ns.leg is not None: fields.append(f"legLength = {ns.leg}")
+        if ns.descend is not None: fields.append(f"descend = {ns.descend}")
+        if ns.min_fuel is not None: fields.append(f"minFuel = {ns.min_fuel}")
+        if ns.column_step is not None: fields.append(f"columnStep = {ns.column_step}")
+        if ns.column_dy is not None: fields.append(f"columnDY = {ns.column_dy}")
+        if ns.tidy is not None: fields.append(f"tidy = {lua_bool(ns.tidy)}")
+        if ns.observant is not None: fields.append(f"observant = {lua_bool(ns.observant)}")
+        if ns.thorough is not None: fields.append(f"thorough = {lua_bool(ns.thorough)}")
+        params = "{ " + ", ".join(fields) + " }"
+        return f"mine_vertical {params}", f'dofile("/lib/job.lua").request("mine_vertical", {params})'
+
+    if cmd == "stop":
+        return "stop current job", 'dofile("/lib/job.lua").stop()'
+
+    if cmd == "jobstatus":
+        return "job status", 'return dofile("/lib/job.lua").status()'
+
+    if cmd == "pos":
+        if getattr(ns, "full", False):
+            return "position report (full spin)", 'return dofile("/lib/nav.lua").report({ full = true })'
+        return "position report", 'return dofile("/lib/nav.lua").report()'
+
+    if cmd == "turnleft":
+        return "turn left", 'dofile("/lib/nav.lua").turnLeft(); return dofile("/lib/nav.lua").report()'
+
+    if cmd == "turnright":
+        return "turn right", 'dofile("/lib/nav.lua").turnRight(); return dofile("/lib/nav.lua").report()'
+
+    if cmd == "setpos":
+        command = (
+            f'dofile("/lib/nav.lua").setPosition({ns.x}, {ns.y}, {ns.z}, {facing_lua(ns.facing)}); '
+            'return dofile("/lib/nav.lua").report()'
+        )
+        return f"set position to ({ns.x}, {ns.y}, {ns.z}) facing {ns.facing}", command
+
+    if cmd == "inv":
+        return "inventory report", 'return dofile("/lib/inventory.lua").report()'
+
+    if cmd == "home":
+        command = f'return dofile("/lib/home.lua").go({{ allowDig = {lua_bool(ns.dig)} }})'
+        return f"go home dig={ns.dig}", command
+
+    if cmd == "markhome":
+        return "mark current position as home", 'return dofile("/lib/home.lua").mark()'
+
+    if cmd == "findchest":
+        fields = [f"maxRadius = {ns.radius}"]
+        if ns.x is not None and ns.y is not None and ns.z is not None:
+            fields += [f"x = {ns.x}", f"y = {ns.y}", f"z = {ns.z}"]
+        params = "{ " + ", ".join(fields) + " }"
+        return f"find chest {params}", f'return dofile("/lib/chestfinder.lua").find({params})'
+
+    raise ValueError(f"unknown shortcut: {cmd}")
+
+
+SHORTCUT_NAMES = {
+    "goto", "mine", "stop", "jobstatus", "pos", "setpos", "turnleft", "turnright",
+    "inv", "home", "markhome", "findchest",
+}
+
+
+class ConsoleArgError(Exception):
+    """Raised instead of argparse's default sys.exit(2), so a mistyped
+    shortcut in an active console session prints an error and loops back
+    to the prompt instead of killing the whole session."""
+
+
+class ConsoleArgParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ConsoleArgError(message)
+
+    def exit(self, status=0, message=None):
+        if message:
+            raise ConsoleArgError(message)
+
+
+# Same shortcuts as main()'s subparsers, minus <id> (the console is
+# already pinned to one turtle) and --wait/--wait-timeout (pointless --
+# you're already watching that turtle's live feed).
+def build_console_parser():
+    p = ConsoleArgParser(prog="", add_help=False)
+    sub = p.add_subparsers(dest="cmd")
+
+    gp = sub.add_parser("goto", add_help=False)
+    gp.add_argument("x", type=int)
+    gp.add_argument("y", type=int)
+    gp.add_argument("z", type=int)
+    gp.add_argument("--tolerance", type=int, default=0)
+    gp.add_argument("--dig", action="store_true")
+
+    mp = sub.add_parser("mine", add_help=False)
+    mp.add_argument("--facing", choices=["north", "east", "south", "west"])
+    mp.add_argument("--leg", type=int)
+    mp.add_argument("--descend", type=int)
+    mp.add_argument("--min-fuel", type=int)
+    mp.add_argument("--column-step", type=int)
+    mp.add_argument("--column-dy", type=int)
+    mp.add_argument("--tidy", action=argparse.BooleanOptionalAction, default=None)
+    mp.add_argument("--observant", action=argparse.BooleanOptionalAction, default=None)
+    mp.add_argument("--thorough", action=argparse.BooleanOptionalAction, default=None)
+
+    sub.add_parser("stop", add_help=False)
+    sub.add_parser("jobstatus", add_help=False)
+
+    posp = sub.add_parser("pos", add_help=False)
+    posp.add_argument("--full", action="store_true")
+
+    spc = sub.add_parser("setpos", add_help=False)
+    spc.add_argument("x", type=int)
+    spc.add_argument("y", type=int)
+    spc.add_argument("z", type=int)
+    spc.add_argument("facing")
+
+    sub.add_parser("turnleft", add_help=False)
+    sub.add_parser("turnright", add_help=False)
+
+    sub.add_parser("inv", add_help=False)
+
+    hp = sub.add_parser("home", add_help=False)
+    hp.add_argument("--dig", action="store_true")
+
+    sub.add_parser("markhome", add_help=False)
+
+    fcp = sub.add_parser("findchest", add_help=False)
+    fcp.add_argument("--x", type=int)
+    fcp.add_argument("--y", type=int)
+    fcp.add_argument("--z", type=int)
+    fcp.add_argument("--radius", type=int, default=8)
+
+    return p
+
+
+CONSOLE_HELP = """\
+shortcuts (id and --wait are implied -- you're already watching this turtle live):
+  goto <x> <y> <z> [--tolerance N] [--dig]     move to (x, y, z) as a background job
+  mine [--facing north|east|south|west] [--leg N] [--descend N] [--min-fuel N]
+       [--column-step N] [--column-dy N] [--no-tidy] [--no-observant] [--no-thorough]
+                                                start the vertical strip miner (see below)
+  stop                                         stop the running job (back to idle)
+  jobstatus                                    what job is running / queued
+  pos [--full]                                 report position and surroundings (--full spins to see all 6 sides)
+  setpos <x> <y> <z> <facing>                  manually calibrate position/heading (0-3 or compass name)
+  turnleft                                     turn left 90 degrees
+  turnright                                    turn right 90 degrees
+  inv                                          report inventory contents
+  home [--dig]                                 go to the marked home position
+  markhome                                     mark the current position as home
+  findchest [--x N --y N --z N] [--radius N]   search for a nearby chest
+  help                                         show this list
+
+mine's three modes (all default true, --no-<mode> to disable):
+  tidy       auto-unload into a chest when full, instead of just stopping
+  observant  peek left/right on every leg step
+  thorough   chase veins of anything observant spots (no effect if observant is off)
+
+anything else you type is sent to the turtle as raw Lua, e.g.:
+  dofile("/lib/nav.lua").report()\
+"""
+
+
 def main():
     p = argparse.ArgumentParser(description="Operator CLI for the turtle relay.")
     p.add_argument("--url", default=os.environ.get("RELAY_URL", "http://localhost:8787"))
@@ -140,11 +336,19 @@ def main():
 
     mp = sub.add_parser("mine", parents=[waitp], help="Start the vertical strip miner.")
     mp.add_argument("id")
+    mp.add_argument("--facing", choices=["north", "east", "south", "west"],
+                     help="Direction the mine advances in (default north).")
     mp.add_argument("--leg", type=int, help="Blocks per forward/backward leg (default 10).")
     mp.add_argument("--descend", type=int, help="Blocks descended before each leg (default 3).")
     mp.add_argument("--min-fuel", type=int, help="Stop before a new column below this fuel (default 500).")
-    mp.add_argument("--column-dz", type=int, help="Z shift per new column (default 1).")
+    mp.add_argument("--column-step", type=int, help="Blocks each new column advances in the facing direction (default 1).")
     mp.add_argument("--column-dy", type=int, help="Start-height shift per new column (default 1).")
+    mp.add_argument("--tidy", action=argparse.BooleanOptionalAction, default=None,
+                     help="Auto-unload into a chest when full, instead of just stopping (default true).")
+    mp.add_argument("--observant", action=argparse.BooleanOptionalAction, default=None,
+                     help="Peek left/right on every leg step (default true).")
+    mp.add_argument("--thorough", action=argparse.BooleanOptionalAction, default=None,
+                     help="Chase veins of anything observant spots (default true; no effect if observant is off).")
 
     stp = sub.add_parser("stop", parents=[waitp], help="Stop the running job (back to idle).")
     stp.add_argument("id")
@@ -154,6 +358,22 @@ def main():
 
     pp = sub.add_parser("pos", parents=[waitp], help="Report position and surroundings.")
     pp.add_argument("id")
+    pp.add_argument("--full", action="store_true",
+                     help="Spin to survey all 6 surrounding blocks (north/east/south/west/up/down), not just front/up/down.")
+
+    spp = sub.add_parser("setpos", parents=[waitp],
+                          help="Manually calibrate the tracked position/heading (e.g. after an F3 check).")
+    spp.add_argument("id")
+    spp.add_argument("x", type=int)
+    spp.add_argument("y", type=int)
+    spp.add_argument("z", type=int)
+    spp.add_argument("facing", help="Heading 0-3, or a compass name (north/east/south/west).")
+
+    tlp = sub.add_parser("turnleft", parents=[waitp], help="Turn left 90 degrees.")
+    tlp.add_argument("id")
+
+    trp = sub.add_parser("turnright", parents=[waitp], help="Turn right 90 degrees.")
+    trp.add_argument("id")
 
     ip = sub.add_parser("inv", parents=[waitp], help="Report inventory contents.")
     ip.add_argument("id")
@@ -243,8 +463,11 @@ def main():
         poller = threading.Thread(target=poll_loop, daemon=True)
         poller.start()
 
+        console_parser = build_console_parser()
+
         print(f"live console for turtle {args.id} -- type a command and press enter to "
-              "send it; ctrl-d or ctrl-c to stop")
+              "send it (type `help` to list shortcuts like `goto x y z --dig`; anything "
+              "else is sent as raw Lua); ctrl-d or ctrl-c to stop")
         try:
             while True:
                 try:
@@ -253,17 +476,41 @@ def main():
                     break
                 if not line:
                     continue
+
+                first_word = line.split(None, 1)[0]
+                if first_word in ("help", "?"):
+                    print(CONSOLE_HELP)
+                    continue
+
+                if first_word in SHORTCUT_NAMES:
+                    try:
+                        tokens = shlex.split(line)
+                    except ValueError as e:
+                        print(f"[error parsing command: {e}]", file=sys.stderr)
+                        continue
+                    try:
+                        ns = console_parser.parse_args(tokens)
+                    except ConsoleArgError as e:
+                        print(f"[{e}]", file=sys.stderr)
+                        continue
+                    description, command = build_shortcut(ns.cmd, ns)
+                else:
+                    description, command = None, line
+
                 try:
                     req = urllib.request.Request(
                         f"{url}/cmd?id={args.id}",
-                        data=json.dumps({"command": line}).encode("utf-8"),
+                        data=json.dumps({"command": command}).encode("utf-8"),
                         method="POST",
                     )
                     req.add_header("Authorization", f"Bearer {args.token}")
                     req.add_header("Content-Type", "application/json")
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         res = json.loads(resp.read().decode("utf-8"))
-                    print(f"[queued {res['cmd_id']}]")
+                    if description:
+                        print(f"[queued {res['cmd_id']}] {description}")
+                    else:
+                        print(f"[queued {res['cmd_id']}]")
                 except Exception as e:
                     print(f"[error queuing command: {e}]", file=sys.stderr)
         except KeyboardInterrupt:
@@ -271,51 +518,9 @@ def main():
         finally:
             stop.set()
 
-    elif args.cmd == "goto":
-        command = (
-            'dofile("/lib/job.lua").request("goto", { '
-            f'x = {args.x}, y = {args.y}, z = {args.z}, '
-            f'tolerance = {args.tolerance}, allowDig = {lua_bool(args.dig)} }})'
-        )
-        queue(url, args, f"goto ({args.x}, {args.y}, {args.z}) tolerance={args.tolerance} dig={args.dig}", command)
-
-    elif args.cmd == "mine":
-        fields = []
-        if args.leg is not None: fields.append(f"legLength = {args.leg}")
-        if args.descend is not None: fields.append(f"descend = {args.descend}")
-        if args.min_fuel is not None: fields.append(f"minFuel = {args.min_fuel}")
-        if args.column_dz is not None: fields.append(f"columnDZ = {args.column_dz}")
-        if args.column_dy is not None: fields.append(f"columnDY = {args.column_dy}")
-        params = "{ " + ", ".join(fields) + " }"
-        command = f'dofile("/lib/job.lua").request("mine_vertical", {params})'
-        queue(url, args, f"mine_vertical {params}", command)
-
-    elif args.cmd == "stop":
-        queue(url, args, "stop current job", 'dofile("/lib/job.lua").stop()')
-
-    elif args.cmd == "jobstatus":
-        queue(url, args, "job status", 'return dofile("/lib/job.lua").status()')
-
-    elif args.cmd == "pos":
-        queue(url, args, "position report", 'return dofile("/lib/nav.lua").report()')
-
-    elif args.cmd == "inv":
-        queue(url, args, "inventory report", 'return dofile("/lib/inventory.lua").report()')
-
-    elif args.cmd == "home":
-        command = f'return dofile("/lib/home.lua").go({{ allowDig = {lua_bool(args.dig)} }})'
-        queue(url, args, f"go home dig={args.dig}", command)
-
-    elif args.cmd == "markhome":
-        queue(url, args, "mark current position as home", 'return dofile("/lib/home.lua").mark()')
-
-    elif args.cmd == "findchest":
-        fields = [f"maxRadius = {args.radius}"]
-        if args.x is not None and args.y is not None and args.z is not None:
-            fields += [f"x = {args.x}", f"y = {args.y}", f"z = {args.z}"]
-        params = "{ " + ", ".join(fields) + " }"
-        command = f'return dofile("/lib/chestfinder.lua").find({params})'
-        queue(url, args, f"find chest {params}", command)
+    elif args.cmd in SHORTCUT_NAMES:
+        description, command = build_shortcut(args.cmd, args)
+        queue(url, args, description, command)
 
 
 if __name__ == "__main__":

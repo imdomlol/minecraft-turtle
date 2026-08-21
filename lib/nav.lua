@@ -114,20 +114,48 @@ function M.inspectFront() return describeInspect(turtle.inspect()) end
 function M.inspectUp() return describeInspect(turtle.inspectUp()) end
 function M.inspectDown() return describeInspect(turtle.inspectDown()) end
 
+-- Spins through all 4 compass headings -- exactly 4 turnRight()s, so it
+-- always ends up back at the heading it started with -- inspecting front
+-- at each one, plus up/down: the full 6-block "shell" around the turtle,
+-- not just whichever way it happens to be facing. Used by here()/report()
+-- when opts.full is set.
+local function surroundings()
+  init()
+  local around = {}
+  for _ = 1, 4 do
+    around[HEADINGS[state.heading + 1]] = M.inspectFront()
+    M.turnRight()
+  end
+  around.up = M.inspectUp()
+  around.down = M.inspectDown()
+  return around
+end
+
 -- Main information-gathering entry point: where the turtle is and what's
 -- immediately around it, as a plain table for other scripts to consume.
-function M.here()
+-- opts.full (default false) additionally spins the turtle to survey all
+-- 6 neighboring blocks (north/east/south/west/up/down) instead of just
+-- front/up/down -- see surroundings() above.
+function M.here(opts)
   init()
-  return {
+  local info = {
     x = state.x, y = state.y, z = state.z,
     heading = state.heading,
     facing = HEADINGS[state.heading + 1],
     gpsFixed = state.source ~= "relative",
     source = state.source,
-    front = M.inspectFront(),
-    up = M.inspectUp(),
-    down = M.inspectDown(),
   }
+  if opts and opts.full then
+    info.around = surroundings()
+    info.front = info.around[info.facing]
+    info.up = info.around.up
+    info.down = info.around.down
+  else
+    info.front = M.inspectFront()
+    info.up = M.inspectUp()
+    info.down = M.inspectDown()
+  end
+  return info
 end
 
 local function describeBlock(b)
@@ -137,17 +165,23 @@ end
 
 -- Prints a human-readable snapshot and returns the same table as here(),
 -- so it's equally useful typed interactively (incl. over the remote
--- console) or called from a script.
-function M.report()
-  local info = M.here()
+-- console) or called from a script. opts.full, same as here() above.
+function M.report(opts)
+  local info = M.here(opts)
   local tag = ""
   if info.source == "relative" then tag = "  [relative, no GPS fix]"
   elseif info.source == "manual" then tag = "  [manually calibrated]"
   end
   print(("pos: (%d, %d, %d)  facing: %s%s"):format(info.x, info.y, info.z, info.facing, tag))
-  print("front: " .. describeBlock(info.front))
-  print("up:    " .. describeBlock(info.up))
-  print("down:  " .. describeBlock(info.down))
+  if opts and opts.full then
+    for _, dir in ipairs({ "north", "east", "south", "west", "up", "down" }) do
+      print(("%-6s %s"):format(dir .. ":", describeBlock(info.around[dir])))
+    end
+  else
+    print("front: " .. describeBlock(info.front))
+    print("up:    " .. describeBlock(info.up))
+    print("down:  " .. describeBlock(info.down))
+  end
   return info
 end
 
@@ -213,6 +247,27 @@ function M.turnRight()
     save()
   end
   return ok, err
+end
+
+-- Turns to face `facing` (a heading number 0-3, or a compass name like
+-- "west") using the fewest turns -- at most one turnLeft/turnRight/180.
+function M.face(facing)
+  local heading
+  if type(facing) == "string" then
+    heading = HEADING_BY_NAME[facing:lower()]
+    if not heading then error("unknown facing: " .. tostring(facing), 2) end
+  elseif type(facing) == "number" then
+    heading = facing % 4
+  else
+    error("facing must be a heading number (0-3) or a compass name", 2)
+  end
+
+  init()
+  local diff = (heading - state.heading) % 4
+  if diff == 1 then M.turnRight()
+  elseif diff == 3 then M.turnLeft()
+  elseif diff == 2 then M.turnRight(); M.turnRight()
+  end
 end
 
 _G.__NAV_MODULE = M
