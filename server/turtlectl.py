@@ -16,7 +16,7 @@ jobs vs plain calls -- these build the right dofile(...) command for you:
   turtlectl.py goto <id> <x> <y> <z> [--tolerance N] [--dig]
   turtlectl.py mine <id> [--width-facing north|east|south|west]
                          [--length-facing north|east|south|west|all]
-                         [--length N] [--height N] [--width N]
+                         [--length N] [--step-down N] [--height N] [--width N]
                          [--min-fuel N] [--column-step N] [--column-dy N]
                          [--no-tidy] [--no-observant] [--no-thorough]
   turtlectl.py stop <id>              -- stop the running job, back to idle
@@ -138,6 +138,7 @@ def build_shortcut(cmd, ns):
         if ns.width_facing is not None: fields.append(f'widthFacing = "{ns.width_facing}"')
         if ns.length_facing is not None: fields.append(f'lengthFacing = "{ns.length_facing}"')
         if ns.length is not None: fields.append(f"length = {ns.length}")
+        if ns.step_down is not None: fields.append(f"stepDown = {ns.step_down}")
         if ns.height is not None: fields.append(f"height = {ns.height}")
         if ns.width is not None: fields.append(f"width = {ns.width}")
         if ns.min_fuel is not None: fields.append(f"minFuel = {ns.min_fuel}")
@@ -232,6 +233,7 @@ def build_console_parser():
     mp.add_argument("--width-facing", choices=["north", "east", "south", "west"])
     mp.add_argument("--length-facing", choices=["north", "east", "south", "west", "all"])
     mp.add_argument("--length", type=int)
+    mp.add_argument("--step-down", type=int)
     mp.add_argument("--height", type=int)
     mp.add_argument("--width", type=int)
     mp.add_argument("--min-fuel", type=int)
@@ -276,8 +278,8 @@ CONSOLE_HELP = """\
 shortcuts (id and --wait are implied -- you're already watching this turtle live):
   goto <x> <y> <z> [--tolerance N] [--dig]     move to (x, y, z) as a background job
   mine [--width-facing north|east|south|west] [--length-facing north|east|south|west|all]
-       [--length N] [--height N] [--width N] [--min-fuel N] [--column-step N] [--column-dy N]
-       [--no-tidy] [--no-observant] [--no-thorough]
+       [--length N] [--step-down N] [--height N] [--width N] [--min-fuel N]
+       [--column-step N] [--column-dy N] [--no-tidy] [--no-observant] [--no-thorough]
                                                 start the vertical strip miner (see below)
   stop                                         stop the running job (back to idle)
   jobstatus                                    what job is running / queued
@@ -297,6 +299,12 @@ mine's directions (must be perpendicular to each other):
                  width-facing); "all" digs both perpendicular directions per width
                  position (west then east, or north then south) before offsetting,
                  doubling leg coverage with minimal extra backtracking
+
+mine's step sizes:
+  step-down   blocks descended per leg step within a pass (default 5)
+  column-dy   start-height shift per new width position; alternates sign each
+              time -- pick a value that isn't a multiple of step-down or exactly
+              half of it, or adjacent width positions' legs won't interleave (default 2)
 
 mine's caps (default unlimited -- dig to bedrock / run forever):
   height   blocks descended per pass before resetting, instead of going to bedrock
@@ -361,12 +369,14 @@ def main():
                           "\"all\" digs both perpendicular directions per width position (doubles leg coverage). "
                           "Default: auto-picked perpendicular to --width-facing.")
     mp.add_argument("--length", type=int, help="Blocks per forward/backward leg (default 10).")
+    mp.add_argument("--step-down", type=int, help="Blocks descended per leg step within a pass (default 5).")
     mp.add_argument("--height", type=int,
                      help="Cap blocks descended per pass before resetting, instead of digging to bedrock (default: no cap).")
     mp.add_argument("--width", type=int, help="Cap how many width positions to do (default: unlimited).")
     mp.add_argument("--min-fuel", type=int, help="Stop before a new pass below this fuel (default 500).")
     mp.add_argument("--column-step", type=int, help="Blocks each new width position advances along --width-facing (default 1).")
-    mp.add_argument("--column-dy", type=int, help="Start-height shift per new width position (default 1).")
+    mp.add_argument("--column-dy", type=int,
+                     help="Start-height shift per new width position; alternates sign each time (default 2).")
     mp.add_argument("--tidy", action=argparse.BooleanOptionalAction, default=None,
                      help="Auto-unload into a chest when full, instead of just stopping (default true).")
     mp.add_argument("--observant", action=argparse.BooleanOptionalAction, default=None,

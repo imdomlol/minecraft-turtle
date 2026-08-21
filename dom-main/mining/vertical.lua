@@ -18,7 +18,7 @@
 
   At each width position, digs straight down in a zigzag staircase --
   leaning on a turtle being 1 block wide/tall -- rather than a horizontal
-  shaft: descend a few blocks, dig a `length`-block leg, turn 180,
+  shaft: descend `stepDown` blocks, dig a `length`-block leg, turn 180,
   repeat, alternating direction every leg. That continues until it
   bottoms out (bedrock -- the normal end of a "pass") or a leg is
   blocked immediately (a side wall), or, if `height` is set, once that
@@ -41,6 +41,11 @@
   each time, so adjacent width positions' legs land at different depths
   instead of perfectly overlapping -- and starts again, until `width`
   positions have been done (default unlimited) or it's told to stop.
+  columnDY only ever alternates between two fixed offsets (never drifts
+  through a range), so for the best spread between adjacent width
+  positions' leg depths, pick a columnDY that isn't a multiple of
+  `stepDown` or exactly `stepDown / 2` -- either of those makes the two
+  offsets equivalent (or identical) instead of genuinely interleaved.
 
   Meant to run as a lib/job.lua job (see main.lua), not called directly:
   a run long enough to be worth calling "forever" would otherwise block
@@ -93,19 +98,15 @@ local M = {}
 
 local DEFAULTS = {
   length      = 10,       -- blocks dug per forward/backward leg
+  stepDown    = 5,        -- blocks descended per leg step within a pass
   minFuel     = 500,      -- abort before starting a new pass if fuel can't be brought above this
   columnStep  = 1,        -- blocks each new width position advances, along widthFacing, from the previous one
-  columnDY    = 1,        -- magnitude of the start-height shift each new width position; sign alternates every time
+  columnDY    = 2,        -- magnitude of the start-height shift each new width position; sign alternates every time
   widthFacing = "north",  -- overall direction the mine advances in -- see WIDTH_FACINGS below
   tidy        = true,     -- auto-unload into a chest when full, instead of just stopping
   observant   = true,     -- peek left/right on every leg step
   thorough    = true,     -- chase veins of anything observant spots
 }
-
--- Blocks descended per leg step within a pass. Used to be a configurable
--- `descend` param; folded into a fixed constant once that name got
--- repurposed for `height` (the new total-depth-per-pass cap) below.
-local STEP_DOWN = 3
 
 -- params.<mode> or'ing against a default breaks for an explicit `false`
 -- (false or true == true) -- this treats "not provided" (nil) as the only
@@ -325,16 +326,17 @@ local function tunnelUp(n)
 end
 
 -- Digs one switchback pass (a single zigzag descent at one width
--- position, in one length-facing direction). `height` (optional) caps
--- how many blocks this pass descends in total before stopping on its
--- own, even if bedrock is still further down -- nil means no cap (dig
--- to bedrock, the old unconditional behavior). Returns legCount (how
--- many forward legs were attempted) and reason: "bedrock" (can't dig
--- down any further -- the normal unbounded end of a pass), "height
--- limit" (hit the `height` cap exactly, on a clean leg boundary),
--- "blocked" (a leg was obstructed immediately -- a side wall, not the
--- bottom), or "interrupted" (shouldStop() cut it short).
-local function digColumn(length, height, observant, thorough, shouldStop)
+-- position, in one length-facing direction). `stepDown` is how many
+-- blocks it descends per leg step. `height` (optional) caps how many
+-- blocks this pass descends in total before stopping on its own, even
+-- if bedrock is still further down -- nil means no cap (dig to bedrock,
+-- the old unconditional behavior). Returns legCount (how many forward
+-- legs were attempted) and reason: "bedrock" (can't dig down any
+-- further -- the normal unbounded end of a pass), "height limit" (hit
+-- the `height` cap exactly, on a clean leg boundary), "blocked" (a leg
+-- was obstructed immediately -- a side wall, not the bottom), or
+-- "interrupted" (shouldStop() cut it short).
+local function digColumn(length, stepDown, height, observant, thorough, shouldStop)
   local legCount = 0
   local depth = 0
 
@@ -343,11 +345,11 @@ local function digColumn(length, height, observant, thorough, shouldStop)
       return legCount, "interrupted"
     end
 
-    local step = STEP_DOWN
+    local step = stepDown
     if height then
       local remaining = height - depth
       if remaining <= 0 then return legCount, "height limit" end
-      step = math.min(STEP_DOWN, remaining)
+      step = math.min(stepDown, remaining)
     end
 
     local dSteps = tunnelDown(step)
@@ -443,13 +445,13 @@ local function unloadIfFull(columnStart, tidy)
   return true
 end
 
--- Job entry point (see lib/job.lua): params is { length, height,
--- minFuel, columnStep, columnDY, widthFacing, lengthFacing, width, tidy,
--- observant, thorough }, all optional (see DEFAULTS). widthFacing/
--- lengthFacing are compass names ("north", "east", "south", "west");
--- lengthFacing also accepts "all". height caps blocks descended per pass
--- (nil = dig to bedrock). width caps how many width positions to do
--- (nil = unlimited). tidy/observant/thorough are the boolean modes
+-- Job entry point (see lib/job.lua): params is { length, stepDown,
+-- height, minFuel, columnStep, columnDY, widthFacing, lengthFacing,
+-- width, tidy, observant, thorough }, all optional (see DEFAULTS).
+-- widthFacing/lengthFacing are compass names ("north", "east", "south",
+-- "west"); lengthFacing also accepts "all". height caps blocks descended
+-- per pass (nil = dig to bedrock). width caps how many width positions
+-- to do (nil = unlimited). tidy/observant/thorough are the boolean modes
 -- described at the top of this file. Marks home (lib/home.lua) if
 -- nothing's marked yet, so the very first width position's top is
 -- remembered even across a mid-run reboot -- each subsequent position's
@@ -458,6 +460,7 @@ end
 function M.run(params, shouldStop)
   params = params or {}
   local length      = params.length or DEFAULTS.length
+  local stepDown    = params.stepDown or DEFAULTS.stepDown
   local height      = params.height -- nil = no cap, dig to bedrock
   local minFuel     = params.minFuel or DEFAULTS.minFuel
   local columnStep  = params.columnStep or DEFAULTS.columnStep
@@ -525,7 +528,7 @@ function M.run(params, shouldStop)
       print(("vertical: width %d, pass facing %s starting at (%d, %d, %d)")
         :format(widthIndex, dir, columnStart.x, columnStart.y, columnStart.z))
 
-      local legCount, reason = digColumn(length, height, observant, thorough, shouldStop)
+      local legCount, reason = digColumn(length, stepDown, height, observant, thorough, shouldStop)
       print(("vertical: width %d pass done -- %d legs (%s), climbing back to start")
         :format(widthIndex, legCount, reason))
 

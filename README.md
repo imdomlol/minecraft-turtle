@@ -571,8 +571,8 @@ permanently block the remote console:
 
 ```
 dofile("/lib/job.lua").request("mine_vertical", {
-  widthFacing = "north", lengthFacing = "all", length = 10, height = 40,
-  width = 20, minFuel = 500, columnStep = 1, columnDY = 1,
+  widthFacing = "north", lengthFacing = "all", length = 10, stepDown = 5,
+  height = 40, width = 20, minFuel = 500, columnStep = 1, columnDY = 2,
 })
 dofile("/lib/job.lua").stop()
 ```
@@ -590,6 +590,7 @@ dofile("/lib/job.lua").stop()
   perpendicular to `widthFacing`, or the job fails immediately with a
   clear error.
 - `length` (default 10): blocks dug per forward/backward leg.
+- `stepDown` (default 5): blocks descended per leg step within a pass.
 - `height` (default: none — dig to bedrock): caps how many blocks a
   single pass descends before resetting, even if bedrock is still
   further down. Useful for staying within a known-safe depth band.
@@ -599,12 +600,16 @@ dofile("/lib/job.lua").stop()
   can't be brought above this.
 - `columnStep` (default 1): blocks each new width position advances,
   along `widthFacing`, from the previous one.
-- `columnDY` (default 1): magnitude of the *starting height* shift each
+- `columnDY` (default 2): magnitude of the *starting height* shift each
   new width position; sign alternates every time, so width positions
-  march steadily outward, staggered up/down by 1 around the original
-  height rather than all starting at the same y. That stagger means
-  adjacent width positions' horizontal legs also land at different
-  depths instead of perfectly overlapping.
+  march steadily outward, staggered up/down around the original height
+  (never drifting through a range of offsets — it only ever alternates
+  between two fixed ones) rather than all starting at the same y. That
+  stagger means adjacent width positions' horizontal legs also land at
+  different depths instead of perfectly overlapping — **but only if
+  `columnDY` isn't a multiple of `stepDown` or exactly half of it**;
+  either of those makes the two alternating offsets equivalent (or
+  identical) instead of genuinely interleaved, defeating the point.
 
 The climb back up deliberately doesn't retrace the zigzag turn by turn —
 it just repositions horizontally (via `pathfind.goto()`, `allowDig =
@@ -678,8 +683,8 @@ somewhere safe first.
 
 `shouldStop()` is only checked once per pass iteration (between full
 down+forward+turn cycles), not between individual blocks — so expect up
-to roughly a `length` block actions' worth of latency between requesting
-a stop and it actually taking effect.
+to roughly a `stepDown + length` block actions' worth of latency between
+requesting a stop and it actually taking effect.
 
 Marks `lib/home.lua`'s position on first start if nothing's marked yet
 (so the very first width position's top survives a mid-run reboot), but
