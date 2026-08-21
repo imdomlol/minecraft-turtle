@@ -138,13 +138,18 @@ local AXIS_OF = { north = "z", south = "z", east = "x", west = "x" }
 local MAX_DIG_ATTEMPTS = 8
 
 -- "Valuable" for `thorough`'s purposes: any ore block (vanilla and
--- modded blocks alike overwhelmingly follow the "..._ore" naming
--- convention, including deepslate variants) plus ancient debris, which
--- doesn't. Deliberately broad rather than an exact vanilla ID list, so a
--- modded server's ores get chased too without needing an update here.
+-- modded blocks alike overwhelmingly have "_ore" somewhere in the name,
+-- including deepslate variants and ones with a trailing variant/suffix
+-- after "_ore" itself) plus ancient debris, which doesn't follow that
+-- convention at all. Deliberately broad (a plain substring match, not
+-- anchored to the end of the name) rather than an exact vanilla ID list,
+-- so a modded server's ores get chased too without needing an update
+-- here -- a false positive (something with "_ore" in the name that
+-- isn't actually ore) is an acceptable rare cost for not missing real
+-- ones with a differently-placed suffix.
 local function isValuable(name)
   if not name then return false end
-  return name:find("_ore$") ~= nil or name:find("ancient_debris$") ~= nil
+  return name:find("_ore") ~= nil or name:find("ancient_debris") ~= nil
 end
 
 -- The 6 axis-aligned neighbors of a cell. The 4 horizontal ones carry the

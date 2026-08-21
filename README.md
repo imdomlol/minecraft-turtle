@@ -653,9 +653,10 @@ Three optional boolean modes, all default `true`:
   movement only (not the vertical descend) — that's the only place
   "left/right" means anything as the turtle moves.
 - `thorough`: chases down veins of anything `observant` spots (any block
-  name matching `..._ore$`, plus `ancient_debris` — broad on purpose, so
-  a modded server's ore naming mostly gets picked up too) instead of
-  leaving it for a neighboring leg or width position to maybe stumble
+  name containing `_ore` anywhere, plus `ancient_debris` — broad on
+  purpose, so a modded server's ore naming, including a trailing
+  variant/suffix after `_ore` itself, mostly gets picked up too) instead
+  of leaving it for a neighboring leg or width position to maybe stumble
   into later. **`thorough` only ever acts on what `observant` finds**, so
   it has no effect with `observant = false` — it doesn't separately
   re-inspect the block a leg is about to dig through, since by the time a
