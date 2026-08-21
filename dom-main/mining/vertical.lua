@@ -246,12 +246,16 @@ local function scanSides(pos, thorough)
   nav.turnLeft()
   local leftHeading = nav.getPosition().heading
   local left = nav.inspectFront()
-  if left.present then print("vertical: spotted " .. left.name .. " to the left") end
+  if left.present then
+    print("vertical: spotted " .. left.name .. " to the left" .. (isValuable(left.name) and " (valuable)" or ""))
+  end
 
   nav.turnRight(); nav.turnRight()
   local rightHeading = nav.getPosition().heading
   local right = nav.inspectFront()
-  if right.present then print("vertical: spotted " .. right.name .. " to the right") end
+  if right.present then
+    print("vertical: spotted " .. right.name .. " to the right" .. (isValuable(right.name) and " (valuable)" or ""))
+  end
 
   nav.turnLeft()
 
