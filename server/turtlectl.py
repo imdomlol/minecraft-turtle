@@ -14,7 +14,9 @@ Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
 jobs vs plain calls -- these build the right dofile(...) command for you:
   turtlectl.py goto <id> <x> <y> <z> [--tolerance N] [--dig]
-  turtlectl.py mine <id> [--facing north|east|south|west] [--leg N] [--descend N]
+  turtlectl.py mine <id> [--width-facing north|east|south|west]
+                         [--length-facing north|east|south|west|all]
+                         [--length N] [--height N] [--width N]
                          [--min-fuel N] [--column-step N] [--column-dy N]
                          [--no-tidy] [--no-observant] [--no-thorough]
   turtlectl.py stop <id>              -- stop the running job, back to idle
@@ -35,7 +37,7 @@ it -- handy for a quick check without a separate `results`/`console` look.
 The same shortcuts (minus <id>, which is already implied, and --wait,
 which is pointless when you're already watching the live feed) also work
 typed directly into an active `console` session, e.g. `goto -89 55 -87
---dig` or `mine --leg 12`. Anything whose first word isn't a shortcut
+--dig` or `mine --length 12`. Anything whose first word isn't a shortcut
 name is sent through unchanged, as raw Lua, same as before.
 
 Reads RELAY_URL and RELAY_TOKEN from the environment; --url/--token override.
@@ -133,9 +135,11 @@ def build_shortcut(cmd, ns):
 
     if cmd == "mine":
         fields = []
-        if ns.facing is not None: fields.append(f'facing = "{ns.facing}"')
-        if ns.leg is not None: fields.append(f"legLength = {ns.leg}")
-        if ns.descend is not None: fields.append(f"descend = {ns.descend}")
+        if ns.width_facing is not None: fields.append(f'widthFacing = "{ns.width_facing}"')
+        if ns.length_facing is not None: fields.append(f'lengthFacing = "{ns.length_facing}"')
+        if ns.length is not None: fields.append(f"length = {ns.length}")
+        if ns.height is not None: fields.append(f"height = {ns.height}")
+        if ns.width is not None: fields.append(f"width = {ns.width}")
         if ns.min_fuel is not None: fields.append(f"minFuel = {ns.min_fuel}")
         if ns.column_step is not None: fields.append(f"columnStep = {ns.column_step}")
         if ns.column_dy is not None: fields.append(f"columnDY = {ns.column_dy}")
@@ -225,9 +229,11 @@ def build_console_parser():
     gp.add_argument("--dig", action="store_true")
 
     mp = sub.add_parser("mine", add_help=False)
-    mp.add_argument("--facing", choices=["north", "east", "south", "west"])
-    mp.add_argument("--leg", type=int)
-    mp.add_argument("--descend", type=int)
+    mp.add_argument("--width-facing", choices=["north", "east", "south", "west"])
+    mp.add_argument("--length-facing", choices=["north", "east", "south", "west", "all"])
+    mp.add_argument("--length", type=int)
+    mp.add_argument("--height", type=int)
+    mp.add_argument("--width", type=int)
     mp.add_argument("--min-fuel", type=int)
     mp.add_argument("--column-step", type=int)
     mp.add_argument("--column-dy", type=int)
@@ -269,8 +275,9 @@ def build_console_parser():
 CONSOLE_HELP = """\
 shortcuts (id and --wait are implied -- you're already watching this turtle live):
   goto <x> <y> <z> [--tolerance N] [--dig]     move to (x, y, z) as a background job
-  mine [--facing north|east|south|west] [--leg N] [--descend N] [--min-fuel N]
-       [--column-step N] [--column-dy N] [--no-tidy] [--no-observant] [--no-thorough]
+  mine [--width-facing north|east|south|west] [--length-facing north|east|south|west|all]
+       [--length N] [--height N] [--width N] [--min-fuel N] [--column-step N] [--column-dy N]
+       [--no-tidy] [--no-observant] [--no-thorough]
                                                 start the vertical strip miner (see below)
   stop                                         stop the running job (back to idle)
   jobstatus                                    what job is running / queued
@@ -283,6 +290,17 @@ shortcuts (id and --wait are implied -- you're already watching this turtle live
   markhome                                     mark the current position as home
   findchest [--x N --y N --z N] [--radius N]   search for a nearby chest
   help                                         show this list
+
+mine's directions (must be perpendicular to each other):
+  width-facing   direction the mine advances in over time (default north)
+  length-facing  direction each leg digs into (default: auto-picked perpendicular to
+                 width-facing); "all" digs both perpendicular directions per width
+                 position (west then east, or north then south) before offsetting,
+                 doubling leg coverage with minimal extra backtracking
+
+mine's caps (default unlimited -- dig to bedrock / run forever):
+  height   blocks descended per pass before resetting, instead of going to bedrock
+  width    how many width positions to do before stopping
 
 mine's three modes (all default true, --no-<mode> to disable):
   tidy       auto-unload into a chest when full, instead of just stopping
@@ -336,13 +354,19 @@ def main():
 
     mp = sub.add_parser("mine", parents=[waitp], help="Start the vertical strip miner.")
     mp.add_argument("id")
-    mp.add_argument("--facing", choices=["north", "east", "south", "west"],
-                     help="Direction the mine advances in (default north).")
-    mp.add_argument("--leg", type=int, help="Blocks per forward/backward leg (default 10).")
-    mp.add_argument("--descend", type=int, help="Blocks descended before each leg (default 3).")
-    mp.add_argument("--min-fuel", type=int, help="Stop before a new column below this fuel (default 500).")
-    mp.add_argument("--column-step", type=int, help="Blocks each new column advances in the facing direction (default 1).")
-    mp.add_argument("--column-dy", type=int, help="Start-height shift per new column (default 1).")
+    mp.add_argument("--width-facing", choices=["north", "east", "south", "west"],
+                     help="Direction the mine advances in over time, as it starts new width positions (default north).")
+    mp.add_argument("--length-facing", choices=["north", "east", "south", "west", "all"],
+                     help="Direction each leg digs into -- must be perpendicular to --width-facing. "
+                          "\"all\" digs both perpendicular directions per width position (doubles leg coverage). "
+                          "Default: auto-picked perpendicular to --width-facing.")
+    mp.add_argument("--length", type=int, help="Blocks per forward/backward leg (default 10).")
+    mp.add_argument("--height", type=int,
+                     help="Cap blocks descended per pass before resetting, instead of digging to bedrock (default: no cap).")
+    mp.add_argument("--width", type=int, help="Cap how many width positions to do (default: unlimited).")
+    mp.add_argument("--min-fuel", type=int, help="Stop before a new pass below this fuel (default 500).")
+    mp.add_argument("--column-step", type=int, help="Blocks each new width position advances along --width-facing (default 1).")
+    mp.add_argument("--column-dy", type=int, help="Start-height shift per new width position (default 1).")
     mp.add_argument("--tidy", action=argparse.BooleanOptionalAction, default=None,
                      help="Auto-unload into a chest when full, instead of just stopping (default true).")
     mp.add_argument("--observant", action=argparse.BooleanOptionalAction, default=None,

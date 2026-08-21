@@ -1,53 +1,65 @@
 --[[----------------------------------------------------------------------
   dom-main/mining/vertical.lua -- vertical switchback strip miner.
 
-  Digs straight down in a zigzag staircase rather than a horizontal
-  shaft, leaning on the fact that a turtle is 1 block wide/tall and can
-  fly: descend `descend` blocks, dig forward `legLength` blocks, turn
-  180, repeat -- since a descend always happens right before a leg and
-  legs alternate direction every time, this traces a switchback pattern
-  (leg N and leg N+2 sit on the same horizontal footprint, one level
-  apart), covering a `legLength`*2-wide vertical slice as it goes.
+  Two independent directions, deliberately kept distinct since they mean
+  different things and must be perpendicular to each other:
+  - widthFacing: the direction the mine advances in *over time*, as it
+    starts new width positions (this used to just be called `facing`).
+    Compass name, default "north".
+  - lengthFacing: the direction each *leg* actually digs into. Compass
+    name; defaults to whichever perpendicular direction the old code
+    always auto-picked (see WIDTH_FACINGS below), so an unset
+    lengthFacing behaves like before. Can also be "all" -- see below.
+  Marching parallel to the legs would just walk new width positions down
+  the same line the legs already dug, instead of spreading into a fresh
+  plane -- so widthFacing and lengthFacing must be on different axes:
+  north paired with east or west is fine, north paired with south or
+  north itself is rejected with a clear error.
 
-  When a column bottoms out (can't dig down any further -- bedrock, the
-  normal end of a column) or a leg is blocked immediately (a side wall,
-  not the bottom), it gets back under the column's own start (x, z) --
-  digging through anything in the way -- and digs straight up to that
-  start's y, rather than retracing the zigzag turn by turn: most of that
-  vertical column is already opened up by the zigzag's own legs crossing
-  through it, a straight climb is far simpler, and for a deep column it's
-  faster too. It then shifts to a new column -- stepping `columnStep`
-  blocks further out in the direction given by `facing` (default north;
-  see FACINGS below) every time; the column's *starting height* (y)
-  shifts by columnDY, alternating sign each time -- and starts again,
-  forever, until told to stop. `facing` sets the *marching* direction the
-  whole operation advances in over time, not the legs' own dig direction:
-  the legs always run perpendicular to it (M.run() turns to face that
-  perpendicular once, up front), since marching parallel to the legs
-  would just walk new columns down the same line the legs already dug,
-  instead of spreading coverage into a fresh plane. Staggering each
-  column's start height rather than starting every column at the same y
-  means adjacent columns' horizontal legs also land at different depths
-  instead of perfectly overlapping.
+  At each width position, digs straight down in a zigzag staircase --
+  leaning on a turtle being 1 block wide/tall -- rather than a horizontal
+  shaft: descend a few blocks, dig a `length`-block leg, turn 180,
+  repeat, alternating direction every leg. That continues until it
+  bottoms out (bedrock -- the normal end of a "pass") or a leg is
+  blocked immediately (a side wall), or, if `height` is set, once that
+  many blocks have been descended in this pass. It then gets back under
+  the pass's own start (x, z) -- digging through anything in the way,
+  since most of it is already opened up by the zigzag's own legs -- and
+  climbs straight back up, rather than retracing the zigzag turn by turn.
+
+  lengthFacing = "all" runs this twice per width position instead of
+  once, in both directions along the perpendicular axis (e.g. east then
+  west) -- doubling total leg coverage -- before advancing to the next
+  width position, rather than alternating direction between width
+  positions: both passes happen at the *same* width position back to
+  back (each fully climbing back to that position's start first), so the
+  only extra travel cost is paid once per width position, not per pass.
+
+  After however many passes ran, it shifts to a new width position --
+  stepping `columnStep` blocks further out along widthFacing -- the
+  position's *starting height* (y) shifts by columnDY, alternating sign
+  each time, so adjacent width positions' legs land at different depths
+  instead of perfectly overlapping -- and starts again, until `width`
+  positions have been done (default unlimited) or it's told to stop.
 
   Meant to run as a lib/job.lua job (see main.lua), not called directly:
   a run long enough to be worth calling "forever" would otherwise block
   the remote console from ever reaching it again. Start/stop it with:
-    dofile("/lib/job.lua").request("mine_vertical", { legLength = 10 })
+    dofile("/lib/job.lua").request("mine_vertical", { length = 10 })
     dofile("/lib/job.lua").stop()
-  shouldStop() (passed in by lib/job.lua) is only checked once per column
+  shouldStop() (passed in by lib/job.lua) is only checked once per pass
   iteration (between full down+forward+turn cycles), not between
-  individual blocks -- so expect up to roughly a `descend + legLength`
-  block actions' worth of latency before a stop actually takes effect.
+  individual blocks -- so expect up to roughly a `length` block actions'
+  worth of latency before a stop actually takes effect.
 
-  Checks inventory once per column boundary (same granularity as the
-  shouldStop check, and for the same reason -- checking mid-leg would add
-  a lot of complexity for a rare event). If full, it finds a chest (see
-  lib/chestfinder.lua -- defaults to searching around lib/home.lua's
-  position), drops everything in, and returns to the column it was
-  working on before continuing. If no chest can be found, or the one
-  found is itself too full to take everything, mining stops rather than
-  quietly discarding items or looping forever hunting for space.
+  Checks inventory (and fuel) once per pass, before it starts (so twice
+  per width position under lengthFacing = "all"). If full and `tidy`
+  (see below) is true, it finds a chest (see lib/chestfinder.lua --
+  defaults to searching around lib/home.lua's position), drops
+  everything in, and returns to the position it was working on before
+  continuing. If no chest can be found, or the one found is itself too
+  full to take everything, mining stops rather than quietly discarding
+  items or looping forever hunting for space.
 
   Three optional boolean modes, all default true:
   - tidy: the inventory-unloading behavior described above. tidy = false
@@ -80,16 +92,20 @@ local chestfinder = dofile("/lib/chestfinder.lua")
 local M = {}
 
 local DEFAULTS = {
-  legLength  = 10,       -- blocks dug per forward/backward leg
-  descend    = 3,        -- blocks descended before each leg
-  minFuel    = 500,      -- abort before starting a new column if fuel can't be brought above this
-  columnStep = 1,        -- blocks each new column advances, in the `facing` direction, from the previous one
-  columnDY   = 1,        -- magnitude of the start-height shift each new column; sign alternates every column
-  facing     = "north",  -- overall direction the mine advances in -- see FACINGS below
-  tidy       = true,     -- auto-unload into a chest when full, instead of just stopping
-  observant  = true,     -- peek left/right on every leg step
-  thorough   = true,     -- chase veins of anything observant spots
+  length      = 10,       -- blocks dug per forward/backward leg
+  minFuel     = 500,      -- abort before starting a new pass if fuel can't be brought above this
+  columnStep  = 1,        -- blocks each new width position advances, along widthFacing, from the previous one
+  columnDY    = 1,        -- magnitude of the start-height shift each new width position; sign alternates every time
+  widthFacing = "north",  -- overall direction the mine advances in -- see WIDTH_FACINGS below
+  tidy        = true,     -- auto-unload into a chest when full, instead of just stopping
+  observant   = true,     -- peek left/right on every leg step
+  thorough    = true,     -- chase veins of anything observant spots
 }
+
+-- Blocks descended per leg step within a pass. Used to be a configurable
+-- `descend` param; folded into a fixed constant once that name got
+-- repurposed for `height` (the new total-depth-per-pass cap) below.
+local STEP_DOWN = 3
 
 -- params.<mode> or'ing against a default breaks for an explicit `false`
 -- (false or true == true) -- this treats "not provided" (nil) as the only
@@ -99,17 +115,22 @@ local function optBool(v, default)
   return v
 end
 
--- Maps the marching direction (`facing`, a compass name) to which world
--- axis it advances along and which way, plus which way the legs (the
--- perpendicular axis) should face -- picked once, up front, since legs
--- alternate their own direction every leg anyway via a 180 turn, so
--- either perpendicular choice works equally well.
-local FACINGS = {
-  north = { axis = "z", sign = -1, legFacing = "east" },
-  south = { axis = "z", sign = 1,  legFacing = "east" },
-  east  = { axis = "x", sign = 1,  legFacing = "north" },
-  west  = { axis = "x", sign = -1, legFacing = "north" },
+-- Maps widthFacing (a compass name) to which world axis it advances
+-- along and which way, plus the default lengthFacing (one perpendicular
+-- direction) and the order lengthFacing = "all" tries both perpendicular
+-- directions in. Legs alternate their own direction every leg anyway via
+-- a 180 turn, so either perpendicular choice/order works equally well --
+-- these are just fixed, deterministic picks.
+local WIDTH_FACINGS = {
+  north = { axis = "z", sign = -1, defaultLengthFacing = "east",  allOrder = { "east", "west" } },
+  south = { axis = "z", sign = 1,  defaultLengthFacing = "east",  allOrder = { "east", "west" } },
+  east  = { axis = "x", sign = 1,  defaultLengthFacing = "north", allOrder = { "north", "south" } },
+  west  = { axis = "x", sign = -1, defaultLengthFacing = "north", allOrder = { "north", "south" } },
 }
+
+-- Which world axis a compass name lies on -- used to check lengthFacing
+-- is perpendicular to widthFacing (see M.run() below).
+local AXIS_OF = { north = "z", south = "z", east = "x", west = "x" }
 
 -- Bounds dig retries -- see dom-main/mining/strip.lua for why this can't
 -- be unbounded (CraftOS's "too long without yielding" watchdog).
@@ -303,23 +324,37 @@ local function tunnelUp(n)
   return n
 end
 
--- Digs one switchback column. Returns legCount (how many forward legs
--- were attempted) and reason: "bedrock" (can't dig down any further --
--- the normal end of a column), "blocked" (a leg was obstructed
--- immediately -- a side wall, not the bottom), or "interrupted"
--- (shouldStop() cut it short).
-local function digColumn(legLength, descend, observant, thorough, shouldStop)
+-- Digs one switchback pass (a single zigzag descent at one width
+-- position, in one length-facing direction). `height` (optional) caps
+-- how many blocks this pass descends in total before stopping on its
+-- own, even if bedrock is still further down -- nil means no cap (dig
+-- to bedrock, the old unconditional behavior). Returns legCount (how
+-- many forward legs were attempted) and reason: "bedrock" (can't dig
+-- down any further -- the normal unbounded end of a pass), "height
+-- limit" (hit the `height` cap exactly, on a clean leg boundary),
+-- "blocked" (a leg was obstructed immediately -- a side wall, not the
+-- bottom), or "interrupted" (shouldStop() cut it short).
+local function digColumn(length, height, observant, thorough, shouldStop)
   local legCount = 0
+  local depth = 0
 
   while true do
     if shouldStop and shouldStop() then
       return legCount, "interrupted"
     end
 
-    local dSteps = tunnelDown(descend)
-    if dSteps < descend then return legCount, "bedrock" end
+    local step = STEP_DOWN
+    if height then
+      local remaining = height - depth
+      if remaining <= 0 then return legCount, "height limit" end
+      step = math.min(STEP_DOWN, remaining)
+    end
 
-    local fSteps = tunnelForward(legLength, observant, thorough, shouldStop)
+    local dSteps = tunnelDown(step)
+    depth = depth + dSteps
+    if dSteps < step then return legCount, "bedrock" end
+
+    local fSteps = tunnelForward(length, observant, thorough, shouldStop)
     legCount = legCount + 1
     if fSteps == 0 then return legCount, "blocked" end
 
@@ -408,85 +443,123 @@ local function unloadIfFull(columnStart, tidy)
   return true
 end
 
--- Job entry point (see lib/job.lua): params is { legLength, descend,
--- minFuel, columnStep, columnDY, facing, tidy, observant, thorough }, all
--- optional (see DEFAULTS). facing is a compass name ("north", "east",
--- "south", "west") -- the direction the mine advances in over time; see
--- FACINGS above. tidy/observant/thorough are the boolean modes described
--- at the top of this file. Marks home (lib/home.lua) if nothing's marked
--- yet, so the very first column's top is remembered even across a
--- mid-run reboot -- each subsequent column's own top is just tracked
--- locally, since home.lua only remembers one position and every column
--- needs its own.
+-- Job entry point (see lib/job.lua): params is { length, height,
+-- minFuel, columnStep, columnDY, widthFacing, lengthFacing, width, tidy,
+-- observant, thorough }, all optional (see DEFAULTS). widthFacing/
+-- lengthFacing are compass names ("north", "east", "south", "west");
+-- lengthFacing also accepts "all". height caps blocks descended per pass
+-- (nil = dig to bedrock). width caps how many width positions to do
+-- (nil = unlimited). tidy/observant/thorough are the boolean modes
+-- described at the top of this file. Marks home (lib/home.lua) if
+-- nothing's marked yet, so the very first width position's top is
+-- remembered even across a mid-run reboot -- each subsequent position's
+-- own top is just tracked locally, since home.lua only remembers one
+-- position and every width position needs its own.
 function M.run(params, shouldStop)
   params = params or {}
-  local legLength  = params.legLength or DEFAULTS.legLength
-  local descend    = params.descend or DEFAULTS.descend
-  local minFuel    = params.minFuel or DEFAULTS.minFuel
-  local columnStep = params.columnStep or DEFAULTS.columnStep
-  local columnDY   = params.columnDY or DEFAULTS.columnDY
-  local facing     = params.facing or DEFAULTS.facing
-  local tidy       = optBool(params.tidy, DEFAULTS.tidy)
-  local observant  = optBool(params.observant, DEFAULTS.observant)
-  local thorough   = optBool(params.thorough, DEFAULTS.thorough)
+  local length      = params.length or DEFAULTS.length
+  local height      = params.height -- nil = no cap, dig to bedrock
+  local minFuel     = params.minFuel or DEFAULTS.minFuel
+  local columnStep  = params.columnStep or DEFAULTS.columnStep
+  local columnDY    = params.columnDY or DEFAULTS.columnDY
+  local widthFacing = params.widthFacing or DEFAULTS.widthFacing
+  local widthCap    = params.width -- nil = unlimited
+  local tidy        = optBool(params.tidy, DEFAULTS.tidy)
+  local observant   = optBool(params.observant, DEFAULTS.observant)
+  local thorough    = optBool(params.thorough, DEFAULTS.thorough)
 
-  local march = FACINGS[tostring(facing):lower()]
-  if not march then
-    return false, "unknown facing: " .. tostring(facing) .. " (expected north, east, south, or west)"
+  local width = WIDTH_FACINGS[tostring(widthFacing):lower()]
+  if not width then
+    return false, "unknown widthFacing: " .. tostring(widthFacing) .. " (expected north, east, south, or west)"
+  end
+
+  -- Resolve lengthFacing into an ordered list of 1 (a specific
+  -- direction) or 2 ("all") starting directions each width position
+  -- runs a full pass in.
+  local lengthDirections
+  if params.lengthFacing == nil then
+    lengthDirections = { width.defaultLengthFacing }
+  elseif tostring(params.lengthFacing):lower() == "all" then
+    lengthDirections = width.allOrder
+  else
+    local lf = tostring(params.lengthFacing):lower()
+    if not AXIS_OF[lf] then
+      return false, "unknown lengthFacing: " .. tostring(params.lengthFacing)
+        .. ' (expected north, east, south, west, or "all")'
+    end
+    if AXIS_OF[lf] == width.axis then
+      return false, "lengthFacing (" .. lf .. ") must be perpendicular to widthFacing ("
+        .. tostring(widthFacing):lower() .. "), not on the same axis"
+    end
+    lengthDirections = { lf }
   end
 
   if not home.get() then home.mark() end
-  nav.face(march.legFacing)
 
   local columnStart = nav.getPosition()
   local dySign = 1
-  local columnIndex = 0
+  local widthIndex = 0
 
   while not (shouldStop and shouldStop()) do
-    local fuel = turtle.getFuelLevel()
-    if fuel ~= "unlimited" and fuel < minFuel then
-      turtle.refuel()
-      fuel = turtle.getFuelLevel()
+    widthIndex = widthIndex + 1
+    local interrupted = false
+
+    for _, dir in ipairs(lengthDirections) do
+      local fuel = turtle.getFuelLevel()
       if fuel ~= "unlimited" and fuel < minFuel then
-        print(("vertical: stopping -- fuel %s below minimum %d"):format(tostring(fuel), minFuel))
-        return false, "insufficient fuel"
+        turtle.refuel()
+        fuel = turtle.getFuelLevel()
+        if fuel ~= "unlimited" and fuel < minFuel then
+          print(("vertical: stopping -- fuel %s below minimum %d"):format(tostring(fuel), minFuel))
+          return false, "insufficient fuel"
+        end
+      end
+
+      local unloadOk, unloadErr = unloadIfFull(columnStart, tidy)
+      if not unloadOk then
+        print("vertical: stopping -- " .. tostring(unloadErr))
+        return false, unloadErr
+      end
+
+      nav.face(dir)
+      print(("vertical: width %d, pass facing %s starting at (%d, %d, %d)")
+        :format(widthIndex, dir, columnStart.x, columnStart.y, columnStart.z))
+
+      local legCount, reason = digColumn(length, height, observant, thorough, shouldStop)
+      print(("vertical: width %d pass done -- %d legs (%s), climbing back to start")
+        :format(widthIndex, legCount, reason))
+
+      local backOk, backErr = returnToColumnStart(columnStart)
+      if not backOk then
+        print("vertical: could not return to width position's start -- " .. tostring(backErr))
+        return false, "could not return to width position's start: " .. tostring(backErr)
+      end
+
+      if reason == "interrupted" then
+        interrupted = true
+        break
       end
     end
 
-    local unloadOk, unloadErr = unloadIfFull(columnStart, tidy)
-    if not unloadOk then
-      print("vertical: stopping -- " .. tostring(unloadErr))
-      return false, unloadErr
+    if interrupted then
+      print("vertical: interrupted, stopped at width position " .. widthIndex .. "'s start")
+      return true, { width = widthIndex, position = nav.getPosition() }
     end
 
-    columnIndex = columnIndex + 1
-    print(("vertical: column %d starting at (%d, %d, %d)")
-      :format(columnIndex, columnStart.x, columnStart.y, columnStart.z))
-
-    local legCount, reason = digColumn(legLength, descend, observant, thorough, shouldStop)
-    print(("vertical: column %d done -- %d legs (%s), climbing back to column start")
-      :format(columnIndex, legCount, reason))
-
-    local backOk, backErr = returnToColumnStart(columnStart)
-    if not backOk then
-      print("vertical: could not return to column start -- " .. tostring(backErr))
-      return false, "could not return to column start: " .. tostring(backErr)
-    end
-
-    if reason == "interrupted" then
-      print("vertical: interrupted, stopped at column " .. columnIndex .. "'s start")
-      return true, { columns = columnIndex, position = nav.getPosition() }
+    if widthCap and widthIndex >= widthCap then
+      print("vertical: reached width limit (" .. widthCap .. "), stopping")
+      return true, { width = widthIndex, position = nav.getPosition() }
     end
 
     dySign = -dySign
     local nextX, nextZ = columnStart.x, columnStart.z
-    if march.axis == "x" then
-      nextX = nextX + (march.sign * columnStep)
+    if width.axis == "x" then
+      nextX = nextX + (width.sign * columnStep)
     else
-      nextZ = nextZ + (march.sign * columnStep)
+      nextZ = nextZ + (width.sign * columnStep)
     end
     local nextY = columnStart.y + (columnDY * dySign)
-    print(("vertical: moving to column %d at (%d, %d, %d)"):format(columnIndex + 1, nextX, nextY, nextZ))
+    print(("vertical: moving to width position %d at (%d, %d, %d)"):format(widthIndex + 1, nextX, nextY, nextZ))
 
     -- shouldStop here (unlike returnToColumnStart/unloadIfFull's own
     -- travel above) is safe to interrupt: this is "start of the next
@@ -495,18 +568,18 @@ function M.run(params, shouldStop)
     local reached, info = pathfind.goto(nextX, nextY, nextZ, { tolerance = 0, allowDig = true, shouldStop = shouldStop })
     if not reached then
       if info.reason == "interrupted" then
-        print("vertical: interrupted while moving to the next column")
-        return true, { columns = columnIndex, position = nav.getPosition() }
+        print("vertical: interrupted while moving to the next width position")
+        return true, { width = widthIndex, position = nav.getPosition() }
       end
-      print("vertical: could not reach next column -- " .. tostring(info.reason))
-      return false, "could not reach next column: " .. tostring(info.reason)
+      print("vertical: could not reach next width position -- " .. tostring(info.reason))
+      return false, "could not reach next width position: " .. tostring(info.reason)
     end
 
     columnStart = nav.getPosition()
   end
 
-  print("vertical: interrupted before starting a new column")
-  return true, { columns = columnIndex, position = nav.getPosition() }
+  print("vertical: interrupted before starting a new width position")
+  return true, { width = widthIndex, position = nav.getPosition() }
 end
 
 return M
