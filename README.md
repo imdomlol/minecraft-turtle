@@ -615,7 +615,8 @@ dofile("/lib/job.lua").stop()
   perpendicular to `widthFacing`, or the job fails immediately with a
   clear error.
 - `length` (default 10): blocks dug per forward/backward leg.
-- `stepDown` (default 5): blocks descended per leg step within a pass.
+- `stepDown` (default 5 with `observant`, 2 without — see `observant`
+  below): blocks descended per leg step within a pass.
 - `height` (default: none — dig to bedrock): caps how many blocks a
   single pass descends before resetting, even if bedrock is still
   further down. Useful for staying within a known-safe depth band.
@@ -625,8 +626,9 @@ dofile("/lib/job.lua").stop()
   can't be brought above this.
 - `columnStep` (default 1): blocks each new width position advances,
   along `widthFacing`, from the previous one.
-- `columnDY` (default 2): magnitude of the *starting height* shift each
-  new width position; sign alternates every time, so width positions
+- `columnDY` (default 2 with `observant`, 3 without — see `observant`
+  below): magnitude of the *starting height* shift each new width
+  position; sign alternates every time, so width positions
   march steadily outward, staggered up/down around the original height
   (never drifting through a range of offsets — it only ever alternates
   between two fixed ones) rather than all starting at the same y. That
@@ -681,23 +683,30 @@ Three optional boolean modes, all default `true`:
   `tidy = false` skips the chest hunt entirely and just stops the job the
   moment the inventory's full, for when no chest is set up nearby or
   you'd rather manage unloading by hand.
-- `observant`: after every successful forward leg step, turns to peek at
-  the block immediately to the left and right before turning back
-  straight (four extra turns per step) and prints anything notable it
-  sees. Purely a sensing behavior, deliberately scoped to horizontal leg
-  movement only (not the vertical descend) — that's the only place
-  "left/right" means anything as the turtle moves.
-- `thorough`: chases down veins of anything `observant` spots (any block
-  name containing `_ore` anywhere, plus `ancient_debris` — broad on
-  purpose, so a modded server's ore naming, including a trailing
-  variant/suffix after `_ore` itself, mostly gets picked up too — see
-  `lib/ores.lua` below for exceptions) instead of leaving it for a
-  neighboring leg or width position to maybe stumble into later.
-  **`thorough` only ever acts on what `observant` finds**, so
-  it has no effect with `observant = false` — it doesn't separately
-  re-inspect the block a leg is about to dig through, since by the time a
-  vein is spotted that way the turtle's already committed to consuming it
-  as a normal part of the leg. When it does trigger, it flood-fills
+- `observant`: turns to peek at the block immediately to the left and
+  right (four extra turns) — after every successful forward leg step,
+  *and* after every individual block of a `stepDown` descent (not just
+  once for the whole descent burst) — and prints anything notable it
+  sees. Up and down get checked too on every leg step, but that's
+  unconditional (see `thorough` below) since it costs no extra turns;
+  `observant` only controls the left/right peek, which does.
+  `observant = false` also changes `stepDown`/`columnDY`'s own defaults
+  (see below) — with no active left/right scanning, a smaller `stepDown`
+  (denser zigzag) and bigger `columnDY` stagger lean on the switchback's
+  own geometry for coverage instead.
+- `thorough`: chases down veins of anything spotted (any block name
+  containing `_ore` anywhere, plus `ancient_debris` — broad on purpose,
+  so a modded server's ore naming, including a trailing variant/suffix
+  after `_ore` itself, mostly gets picked up too — see `lib/ores.lua`
+  below for exceptions) instead of leaving it for a neighboring leg or
+  width position to maybe stumble into later. **`thorough` acts on
+  whatever gets found regardless of `observant`** — the always-on
+  up/down check alone is enough to trigger it even with
+  `observant = false`; `observant` just means there's more to look at
+  (left/right too). It doesn't separately re-inspect the block a leg is
+  about to dig through, since by the time a vein is spotted that way the
+  turtle's already committed to consuming it as a normal part of the
+  leg. When it does trigger, it flood-fills
   outward through connected valuable neighbors (BFS over each
   newly-mined block's own 6 neighbors, moving to and digging through
   each one via `pathfind.goto()`'s `allowDig`), capped at 48 blocks so a

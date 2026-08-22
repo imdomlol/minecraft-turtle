@@ -74,16 +74,23 @@
     skips the chest hunt entirely -- a full inventory just stops the job
     with a clear reason, for when no chest is set up or you'd rather
     manage unloading yourself.
-  - observant: after every successful forward leg step, turns to peek at
-    the block to the left and the right before turning back straight
-    (four extra turns per step) and prints anything it sees. Purely a
-    sensing behavior -- deliberately scoped to horizontal leg movement
-    only, not descend, since that's where "left/right" means anything.
-  - thorough: chases down veins of anything observant spots (ore, ancient
-    debris -- see isValuable() below) instead of leaving it for a
-    neighboring leg to maybe stumble into later. thorough only ever acts
-    on what observant found, so it has no effect with observant = false
-    -- it doesn't separately re-inspect the block a leg is about to dig
+  - observant: after every successful forward leg step, AND after every
+    individual block of a stepDown descent (not just once for the whole
+    burst), turns to peek at the block to the left and the right before
+    turning back straight (four extra turns each time) and prints
+    anything it sees. Up and down get checked too on every leg step --
+    but that happens regardless of observant, since it costs no extra
+    turns; observant only controls the left/right peek, which does.
+    observant = false also changes stepDown/columnDY's own defaults (see
+    DEFAULTS above) -- with no active left/right scanning, a smaller
+    stepDown (denser zigzag) and bigger columnDY stagger lean on the
+    switchback's own geometry for coverage instead.
+  - thorough: chases down veins of anything spotted (ore, ancient debris
+    -- see isValuable() below) instead of leaving it for a neighboring
+    leg to maybe stumble into later. thorough acts on whatever gets
+    found *regardless of observant* -- the always-on up/down check alone
+    is enough to trigger it; observant just adds more to look at. It
+    doesn't separately re-inspect the block a leg is about to dig
     through, since by the time a vein's spotted that way the turtle's
     already committed to consuming it as a normal part of the leg. When
     it does trigger, it flood-fills outward through connected valuable
@@ -102,14 +109,24 @@ local M = {}
 
 local DEFAULTS = {
   length      = 10,       -- blocks dug per forward/backward leg
-  stepDown    = 5,        -- blocks descended per leg step within a pass
   minFuel     = 500,      -- abort before starting a new pass if fuel can't be brought above this
   columnStep  = 1,        -- blocks each new width position advances, along widthFacing, from the previous one
-  columnDY    = 2,        -- magnitude of the start-height shift each new width position; sign alternates every time
   widthFacing = "north",  -- overall direction the mine advances in -- see WIDTH_FACINGS below
   tidy        = true,     -- auto-unload into a chest when full, instead of just stopping
-  observant   = true,     -- peek left/right on every leg step
-  thorough    = true,     -- chase veins of anything observant spots
+  observant   = true,     -- peek left/right on every leg step and every stepDown block
+  thorough    = true,     -- chase veins of anything spotted (scanUpDown always, scanLeftRight if observant)
+
+  -- stepDown/columnDY default differently depending on observant (see
+  -- M.run() below, which resolves observant first): with observant on,
+  -- it's actively scanning every block already, so a bigger stepDown
+  -- (fewer, larger descents) and a smaller columnDY stagger are fine.
+  -- With observant off, there's no active left/right scanning at all, so
+  -- a smaller stepDown (denser switchback zigzag) and a bigger columnDY
+  -- stagger lean on the geometry itself for coverage instead.
+  stepDownObservant   = 5,
+  stepDownInattentive = 2,
+  columnDYObservant   = 2,
+  columnDYInattentive = 3,
 }
 
 -- params.<mode> or'ing against a default breaks for an explicit `false`
@@ -285,13 +302,45 @@ local function valuableTag(name, unreachableNames)
   return " (valuable)"
 end
 
--- observant's sensing: turtle keeps facing forward (its leg heading)
--- both before and after this call. Peeks left and right, prints anything
--- notable, and -- if thorough -- returns any valuable neighbor found as
--- a mineVein() seed (world-absolute, `pos` is wherever the turtle is
--- right now) -- skipping anything already in unreachableNames. Otherwise
--- returns an empty list.
-local function scanSides(pos, thorough, unreachableNames)
+-- Inspects up and down -- no turning needed, so this is cheap enough to
+-- run unconditionally after every leg-forward step regardless of
+-- `observant` (unlike scanLeftRight below, which needs four turns).
+-- Prints anything notable and -- if thorough -- returns any valuable,
+-- not-already-blacklisted neighbor as a mineVein() seed (world-absolute,
+-- `pos` is wherever the turtle is right now).
+local function scanUpDown(pos, thorough, unreachableNames)
+  local seeds = {}
+
+  local up = nav.inspectUp()
+  if up.present then
+    print("vertical: spotted " .. up.name .. " above" .. valuableTag(up.name, unreachableNames))
+  end
+  local down = nav.inspectDown()
+  if down.present then
+    print("vertical: spotted " .. down.name .. " below" .. valuableTag(down.name, unreachableNames))
+  end
+
+  if thorough then
+    if up.present and isValuable(up.name) and not unreachableNames[up.name] then
+      seeds[#seeds + 1] = { x = pos.x, y = pos.y + 1, z = pos.z, name = up.name }
+    end
+    if down.present and isValuable(down.name) and not unreachableNames[down.name] then
+      seeds[#seeds + 1] = { x = pos.x, y = pos.y - 1, z = pos.z, name = down.name }
+    end
+  end
+
+  return seeds
+end
+
+-- observant's own sensing: turtle keeps facing the same way both before
+-- and after this call. Peeks left and right (four turns), prints
+-- anything notable, and -- if thorough -- returns any valuable,
+-- not-already-blacklisted neighbor as a mineVein() seed (world-absolute,
+-- `pos` is wherever the turtle is right now). Called both after a leg
+-- step and, separately, after each individual block of a stepDown
+-- descent (see digDown below) -- either way, only when observant is on,
+-- since unlike scanUpDown this genuinely costs extra turns.
+local function scanLeftRight(pos, thorough, unreachableNames)
   local seeds = {}
 
   nav.turnLeft()
@@ -381,6 +430,12 @@ end
 -- nowhere to put what comes up, and this needs to reach all the way back
 -- to M.run() to stop cleanly with a clear reason, the same as the old
 -- once-per-pass-boundary check already did.
+-- thorough acts on whatever gets found here regardless of observant --
+-- scanUpDown always runs (it's free, no turning), and scanLeftRight only
+-- runs when observant is on (it costs four turns) -- but either way, any
+-- valuable block either of them finds gets chased if thorough is on.
+-- observant on its own is just "also look left/right too"; it doesn't
+-- gate whether thorough is allowed to act.
 local function digForward(observant, thorough, tidy, unreachableNames, shouldStop)
   for _ = 1, MAX_DIG_ATTEMPTS do
     if not turtle.detect() or isLiquidAhead(turtle.inspect()) then
@@ -390,11 +445,15 @@ local function digForward(observant, thorough, tidy, unreachableNames, shouldSto
         if not unloadOk then
           return true, nil, unloadErr
         end
+
+        local pos = nav.getPosition()
+        local seeds = scanUpDown(pos, thorough, unreachableNames)
         if observant then
-          local seeds = scanSides(nav.getPosition(), thorough, unreachableNames)
-          if thorough and #seeds > 0 then
-            mineVein(seeds, shouldStop, unreachableNames)
-          end
+          local sideSeeds = scanLeftRight(pos, thorough, unreachableNames)
+          for _, s in ipairs(sideSeeds) do seeds[#seeds + 1] = s end
+        end
+        if thorough and #seeds > 0 then
+          mineVein(seeds, shouldStop, unreachableNames)
         end
       end
       return ok, err
@@ -404,9 +463,24 @@ local function digForward(observant, thorough, tidy, unreachableNames, shouldSto
   return false, "obstructed after " .. MAX_DIG_ATTEMPTS .. " dig attempts"
 end
 
-local function digDown()
+-- Same thorough-independent-of-observant principle as digForward above,
+-- applied to a single block of a stepDown descent: when observant is on,
+-- peeks left/right at THIS depth too (see tunnelDown below, which calls
+-- this once per block descended, not once for the whole stepDown burst)
+-- -- catching ore that's only exposed partway down, not just at a
+-- pass's leg-boundary depths.
+local function digDown(observant, thorough, unreachableNames, shouldStop)
   for _ = 1, MAX_DIG_ATTEMPTS do
-    if not turtle.detectDown() or isLiquidAhead(turtle.inspectDown()) then return nav.down() end
+    if not turtle.detectDown() or isLiquidAhead(turtle.inspectDown()) then
+      local ok, err = nav.down()
+      if ok and observant then
+        local seeds = scanLeftRight(nav.getPosition(), thorough, unreachableNames)
+        if thorough and #seeds > 0 then
+          mineVein(seeds, shouldStop, unreachableNames)
+        end
+      end
+      return ok, err
+    end
     if not turtle.digDown() then turtle.attackDown() end
   end
   return false, "obstructed after " .. MAX_DIG_ATTEMPTS .. " dig attempts"
@@ -431,9 +505,9 @@ local function tunnelForward(n, observant, thorough, tidy, unreachableNames, sho
   return n
 end
 
-local function tunnelDown(n)
+local function tunnelDown(n, observant, thorough, unreachableNames, shouldStop)
   for i = 1, n do
-    if not digDown() then return i - 1 end
+    if not digDown(observant, thorough, unreachableNames, shouldStop) then return i - 1 end
   end
   return n
 end
@@ -475,7 +549,7 @@ local function digColumn(length, stepDown, height, observant, thorough, tidy, un
       step = math.min(stepDown, remaining)
     end
 
-    local dSteps = tunnelDown(step)
+    local dSteps = tunnelDown(step, observant, thorough, unreachableNames, shouldStop)
     depth = depth + dSteps
     if dSteps < step then return legCount, "bedrock" end
 
@@ -549,16 +623,22 @@ end
 function M.run(params, shouldStop)
   params = params or {}
   local length      = params.length or DEFAULTS.length
-  local stepDown    = params.stepDown or DEFAULTS.stepDown
   local height      = params.height -- nil = no cap, dig to bedrock
   local minFuel     = params.minFuel or DEFAULTS.minFuel
   local columnStep  = params.columnStep or DEFAULTS.columnStep
-  local columnDY    = params.columnDY or DEFAULTS.columnDY
   local widthFacing = params.widthFacing or DEFAULTS.widthFacing
   local widthCap    = params.width -- nil = unlimited
   local tidy        = optBool(params.tidy, DEFAULTS.tidy)
   local observant   = optBool(params.observant, DEFAULTS.observant)
   local thorough    = optBool(params.thorough, DEFAULTS.thorough)
+
+  -- stepDown/columnDY's own defaults depend on observant (see DEFAULTS
+  -- above) -- only applies when neither is given explicitly; an explicit
+  -- value always wins regardless of observant.
+  local stepDown = params.stepDown
+    or (observant and DEFAULTS.stepDownObservant or DEFAULTS.stepDownInattentive)
+  local columnDY = params.columnDY
+    or (observant and DEFAULTS.columnDYObservant or DEFAULTS.columnDYInattentive)
 
   local width = WIDTH_FACINGS[tostring(widthFacing):lower()]
   if not width then

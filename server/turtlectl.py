@@ -312,8 +312,10 @@ mine's caps (default unlimited -- dig to bedrock / run forever):
 
 mine's three modes (all default true, --no-<mode> to disable):
   tidy       auto-unload into a chest when full, instead of just stopping
-  observant  peek left/right on every leg step
-  thorough   chase veins of anything observant spots (no effect if observant is off)
+  observant  peek left/right on every leg step and every stepDown block (also
+             changes step-down/column-dy's own defaults: 5/2 with, 2/3 without)
+  thorough   chase veins of anything spotted -- up/down always, left/right only
+             if observant -- works even with observant off
 
 anything else you type is sent to the turtle as raw Lua, e.g.:
   dofile("/lib/nav.lua").report()\
@@ -369,20 +371,24 @@ def main():
                           "\"all\" digs both perpendicular directions per width position (doubles leg coverage). "
                           "Default: auto-picked perpendicular to --width-facing.")
     mp.add_argument("--length", type=int, help="Blocks per forward/backward leg (default 10).")
-    mp.add_argument("--step-down", type=int, help="Blocks descended per leg step within a pass (default 5).")
+    mp.add_argument("--step-down", type=int,
+                     help="Blocks descended per leg step within a pass (default 5 with --observant, 2 without).")
     mp.add_argument("--height", type=int,
                      help="Cap blocks descended per pass before resetting, instead of digging to bedrock (default: no cap).")
     mp.add_argument("--width", type=int, help="Cap how many width positions to do (default: unlimited).")
     mp.add_argument("--min-fuel", type=int, help="Stop before a new pass below this fuel (default 500).")
     mp.add_argument("--column-step", type=int, help="Blocks each new width position advances along --width-facing (default 1).")
     mp.add_argument("--column-dy", type=int,
-                     help="Start-height shift per new width position; alternates sign each time (default 2).")
+                     help="Start-height shift per new width position; alternates sign each time "
+                          "(default 2 with --observant, 3 without).")
     mp.add_argument("--tidy", action=argparse.BooleanOptionalAction, default=None,
                      help="Auto-unload into a chest when full, instead of just stopping (default true).")
     mp.add_argument("--observant", action=argparse.BooleanOptionalAction, default=None,
-                     help="Peek left/right on every leg step (default true).")
+                     help="Peek left/right on every leg step and every step-down block; also changes "
+                          "step-down/column-dy's own defaults (default true).")
     mp.add_argument("--thorough", action=argparse.BooleanOptionalAction, default=None,
-                     help="Chase veins of anything observant spots (default true; no effect if observant is off).")
+                     help="Chase veins of anything spotted -- up/down always, left/right only if "
+                          "observant is on -- works even with observant off (default true).")
 
     stp = sub.add_parser("stop", parents=[waitp], help="Stop the running job (back to idle).")
     stp.add_argument("id")
