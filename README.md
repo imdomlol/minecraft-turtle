@@ -232,6 +232,8 @@ python3 server/turtlectl.py inv Lux
 python3 server/turtlectl.py home Lux --dig
 python3 server/turtlectl.py markhome Lux
 python3 server/turtlectl.py findchest Lux --radius 12           # or --x/--y/--z to search elsewhere
+python3 server/turtlectl.py dump Lux                            # find a chest nearby (radius 8) and empty into it
+python3 server/turtlectl.py dump Lux --x 100 --y 64 --z -200    # a known chest location (exact by default)
 ```
 
 Every shortcut above also takes `--wait` (block and print the result once
@@ -500,6 +502,30 @@ turtle is back where the search started, not stranded mid-spiral.
 check, for modded storage that doesn't follow that convention. The
 returned table's `direction` (`"front"`, `"up"`, or `"down"`) says which
 `turtle.drop*()` reaches it — see `lib/inventory.lua`.
+
+`M.dump(opts)` combines `M.find()` with `lib/inventory.lua`'s
+`dropAll()` — find a chest and empty into it in one call:
+
+```
+dofile("/lib/chestfinder.lua").dump({})
+dofile("/lib/chestfinder.lua").dump({ x = 100, y = 64, z = -200 })
+```
+
+Unlike `M.find()`, this defaults to searching around the turtle's own
+*current* position, not home — "dump nearby" is the natural default for
+an ad-hoc unload, as opposed to a mining job's own unloading, which
+wants the long-lived remembered home location. `x`/`y`/`z` (give all
+three, or none) and `maxRadius` interact:
+
+- neither given: search around the turtle, radius 8.
+- `maxRadius` only: search around the turtle, that radius.
+- `x`/`y`/`z` only: search *at* those coordinates, radius 0 — they're
+  assumed to already be the chest's exact location.
+- both given: search around those coordinates, that radius — an "error"
+  margin for when you know roughly, but not exactly, where the chest is.
+
+Returns `{ chest = <M.find()'s result>, emptied = <slots dropped> }` on
+success, or `nil, reason` on failure, same as `M.find()`.
 
 ## lib/inventory.lua
 

@@ -3,11 +3,16 @@
   for one, since a turtle has no long-range scanning API -- only
   turtle.inspect() of whatever's immediately touching it.
 
-  Defaults to searching around lib/home.lua's recorded position; pass
-  x/y/z to search around somewhere else instead. Non-destructive: never
-  digs, and gives up (rather than plowing through obstacles) if a step is
-  blocked, since a locator digging through walls to search would be a
-  surprising thing for it to do on its own.
+  M.find(): defaults to searching around lib/home.lua's recorded
+  position; pass x/y/z to search around somewhere else instead.
+  Non-destructive: never digs, and gives up (rather than plowing through
+  obstacles) if a step is blocked, since a locator digging through walls
+  to search would be a surprising thing for it to do on its own.
+
+  M.dump(): finds a chest (like M.find(), but defaulting to searching
+  around the turtle's own current position instead of home) and empties
+  the inventory into it in one call -- see its own comment below for how
+  x/y/z and maxRadius interact.
 ------------------------------------------------------------------------]]
 
 if _G.__CHESTFINDER_MODULE then return _G.__CHESTFINDER_MODULE end
@@ -15,6 +20,7 @@ if _G.__CHESTFINDER_MODULE then return _G.__CHESTFINDER_MODULE end
 local nav = dofile("/lib/nav.lua")
 local pathfind = dofile("/lib/pathfind.lua")
 local home = dofile("/lib/home.lua")
+local inventory = dofile("/lib/inventory.lua")
 
 local M = {}
 
@@ -121,6 +127,50 @@ function M.find(opts)
 
   pathfind.goto(searchStart.x, searchStart.y, searchStart.z, { tolerance = 0, allowDig = false })
   return nil, reason
+end
+
+-- Finds a chest and drops the whole inventory into it -- M.find() above,
+-- then inventory.dropAll(). Unlike M.find() (which defaults to
+-- searching around lib/home.lua's remembered position when no x/y/z is
+-- given), this defaults to searching around the turtle's OWN current
+-- position instead: "dump nearby" is the natural ad-hoc default here,
+-- as opposed to a mining job's own unload, which wants the long-lived
+-- remembered home location.
+--
+-- opts.x/y/z (give all three, or none) and opts.maxRadius interact:
+--   no coords, no maxRadius  -> search around here,       radius 8
+--   no coords, maxRadius= N  -> search around here,       radius N
+--   coords given, no radius  -> search around those coords, radius 0 (exact)
+--   coords given, radius = N -> search around those coords, radius N (an "error" margin)
+-- i.e. maxRadius defaults to 0 when coordinates are given (they're
+-- assumed to BE the chest) and to the usual 8 otherwise.
+--
+-- Returns { chest = <M.find()'s result>, emptied = <slots dropped> } on
+-- success, or nil, reason on failure (chest not found, same as M.find()).
+function M.dump(opts)
+  opts = opts or {}
+  local hasCoords = opts.x and opts.y and opts.z
+
+  local x, y, z
+  if hasCoords then
+    x, y, z = opts.x, opts.y, opts.z
+  else
+    local pos = nav.getPosition()
+    x, y, z = pos.x, pos.y, pos.z
+  end
+
+  local maxRadius = opts.maxRadius
+  if maxRadius == nil then
+    maxRadius = hasCoords and 0 or DEFAULT_MAX_RADIUS
+  end
+
+  local found, reason = M.find({ x = x, y = y, z = z, maxRadius = maxRadius, matchName = opts.matchName })
+  if not found then
+    return nil, reason
+  end
+
+  local emptied = inventory.dropAll(found.direction)
+  return { chest = found, emptied = emptied }
 end
 
 _G.__CHESTFINDER_MODULE = M

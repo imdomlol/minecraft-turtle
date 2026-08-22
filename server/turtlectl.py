@@ -29,6 +29,10 @@ jobs vs plain calls -- these build the right dofile(...) command for you:
   turtlectl.py home <id> [--dig]      -- go to the marked home position
   turtlectl.py markhome <id>          -- mark the current position as home
   turtlectl.py findchest <id> [--x N --y N --z N] [--radius N]
+  turtlectl.py dump <id> [--x N --y N --z N] [--radius N]
+                         -- find a chest and empty the inventory into it; no
+                         -- coords searches near the turtle (radius 8 default),
+                         -- coords with no radius means exactly there (radius 0)
 
 All of the above accept --wait (and --wait-timeout, default 120s) to
 block and print the result once it completes, instead of just queuing
@@ -191,12 +195,21 @@ def build_shortcut(cmd, ns):
         params = "{ " + ", ".join(fields) + " }"
         return f"find chest {params}", f'return dofile("/lib/chestfinder.lua").find({params})'
 
+    if cmd == "dump":
+        fields = []
+        if ns.x is not None and ns.y is not None and ns.z is not None:
+            fields += [f"x = {ns.x}", f"y = {ns.y}", f"z = {ns.z}"]
+        if ns.radius is not None:
+            fields.append(f"maxRadius = {ns.radius}")
+        params = "{ " + ", ".join(fields) + " }"
+        return f"dump inventory {params}", f'return dofile("/lib/chestfinder.lua").dump({params})'
+
     raise ValueError(f"unknown shortcut: {cmd}")
 
 
 SHORTCUT_NAMES = {
     "goto", "mine", "stop", "jobstatus", "pos", "setpos", "turnleft", "turnright",
-    "inv", "home", "markhome", "findchest",
+    "inv", "home", "markhome", "findchest", "dump",
 }
 
 
@@ -271,6 +284,12 @@ def build_console_parser():
     fcp.add_argument("--z", type=int)
     fcp.add_argument("--radius", type=int, default=8)
 
+    dp = sub.add_parser("dump", add_help=False)
+    dp.add_argument("--x", type=int)
+    dp.add_argument("--y", type=int)
+    dp.add_argument("--z", type=int)
+    dp.add_argument("--radius", type=int)
+
     return p
 
 
@@ -291,6 +310,8 @@ shortcuts (id and --wait are implied -- you're already watching this turtle live
   home [--dig]                                 go to the marked home position
   markhome                                     mark the current position as home
   findchest [--x N --y N --z N] [--radius N]   search for a nearby chest
+  dump [--x N --y N --z N] [--radius N]        find a chest and empty the inventory into it
+                                                (see below for how --x/--y/--z and --radius interact)
   help                                         show this list
 
 mine's directions (must be perpendicular to each other):
@@ -316,6 +337,12 @@ mine's three modes (all default true, --no-<mode> to disable):
              changes step-down/column-dy's own defaults: 5/2 with, 2/3 without)
   thorough   chase veins of anything spotted -- up/down always, left/right only
              if observant -- works even with observant off
+
+dump's --x/--y/--z and --radius interact:
+  neither given         search around the turtle, radius 8
+  --radius only         search around the turtle, that radius
+  --x/--y/--z only      search AT those coords, radius 0 (exact -- assumed to be the chest)
+  both given            search around those coords, that radius (an "error" margin)
 
 anything else you type is sent to the turtle as raw Lua, e.g.:
   dofile("/lib/nav.lua").report()\
@@ -431,6 +458,16 @@ def main():
     fcp.add_argument("--y", type=int)
     fcp.add_argument("--z", type=int)
     fcp.add_argument("--radius", type=int, default=8)
+
+    dp = sub.add_parser("dump", parents=[waitp], help="Find a chest and empty the inventory into it.")
+    dp.add_argument("id")
+    dp.add_argument("--x", type=int, help="Chest location, if known (default: search near the turtle).")
+    dp.add_argument("--y", type=int)
+    dp.add_argument("--z", type=int)
+    dp.add_argument("--radius", type=int,
+                     help="Search radius. Default: 8 around the turtle if no --x/--y/--z given, "
+                          "0 (exact) if they are -- an explicit --radius with coordinates searches "
+                          "that far around them instead of requiring an exact match.")
 
     args = p.parse_args()
     if not args.token:
