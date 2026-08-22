@@ -199,12 +199,26 @@ end
 local MAX_VEIN_BLOCKS = 48
 
 -- Starting from one or more already-spotted valuable neighbors (`seeds`,
--- a list of { x, y, z } world positions, none yet mined), flood-fills
--- outward through connected valuable blocks (BFS over each mined block's
--- own 6 neighbors), digging through each via pathfind.goto()'s allowDig
--- so the move and the dig happen together. shouldStop is honored between
--- targets (stops chasing further ore, but never mid-step), since this is
--- optional extra work, same as the inter-column travel in M.run() below.
+-- a list of { x, y, z, name } world positions, none yet mined), flood-
+-- fills outward through connected valuable blocks (BFS over each mined
+-- block's own 6 neighbors), digging through each via pathfind.goto()'s
+-- allowDig so the move and the dig happen together. shouldStop is
+-- honored between targets (stops chasing further ore, but never
+-- mid-step), since this is optional extra work, same as the
+-- inter-column travel in M.run() below.
+--
+-- A target pathfind.goto() can't actually reach (undiggable regardless
+-- of tool -- bedrock, or a block requiring a higher-tier tool than this
+-- turtle has, e.g. a modded end-game ore) has its *name* -- not just its
+-- position -- added to unreachableNames, shared with scanSides() below
+-- and persisting for the rest of this job run. Without that, the exact
+-- same ore type gets rediscovered and re-chased from scratch by every
+-- later leg step or width position that happens to graze the same
+-- (often large) deposit, each attempt individually bounded but adding
+-- up to a lot of wasted time against something that was never going to
+-- work. One failure is enough to blacklist a name: pathfind.goto()
+-- already retries a blocked step several ways (including its own escape
+-- fallback) before giving up, so this isn't a one-off fluke.
 --
 -- The final return to the exact position/heading the detour started
 -- from is, unlike the search itself, NOT interruptible and always
@@ -214,7 +228,7 @@ local MAX_VEIN_BLOCKS = 48
 -- exactly one cell further along the leg, and a vein detour that never
 -- came back would silently corrupt that assumption for everything after
 -- it (the leg's own remaining steps, the 180 turn between legs, ...).
-local function mineVein(seeds, shouldStop)
+local function mineVein(seeds, shouldStop, unreachableNames)
   local origin = nav.getPosition()
   local visited = {}
   local frontier = {}
@@ -238,11 +252,14 @@ local function mineVein(seeds, shouldStop)
           local nkey = nx .. "," .. ny .. "," .. nz
           if not visited[nkey] then
             local seen = inspectNeighbor(delta)
-            if seen.present and isValuable(seen.name) then
-              frontier[#frontier + 1] = { x = nx, y = ny, z = nz }
+            if seen.present and isValuable(seen.name) and not unreachableNames[seen.name] then
+              frontier[#frontier + 1] = { x = nx, y = ny, z = nz, name = seen.name }
             end
           end
         end
+      elseif target.name and not unreachableNames[target.name] then
+        unreachableNames[target.name] = true
+        print("vertical: could not reach/dig " .. target.name .. " -- treating it as not valuable for the rest of this run")
       end
     end
   end
@@ -255,38 +272,49 @@ local function mineVein(seeds, shouldStop)
   nav.face(origin.heading)
 end
 
+-- Describes what observant's tag for a spotted block should say: blank
+-- if it's not valuable, "(valuable)" if it is and thorough would chase
+-- it, or "(valuable, but couldn't be mined earlier -- skipping)" if
+-- it's a name already in unreachableNames (see mineVein() above).
+local function valuableTag(name, unreachableNames)
+  if not isValuable(name) then return "" end
+  if unreachableNames[name] then return " (valuable, but couldn't be mined earlier -- skipping)" end
+  return " (valuable)"
+end
+
 -- observant's sensing: turtle keeps facing forward (its leg heading)
 -- both before and after this call. Peeks left and right, prints anything
 -- notable, and -- if thorough -- returns any valuable neighbor found as
 -- a mineVein() seed (world-absolute, `pos` is wherever the turtle is
--- right now). Otherwise returns an empty list.
-local function scanSides(pos, thorough)
+-- right now) -- skipping anything already in unreachableNames. Otherwise
+-- returns an empty list.
+local function scanSides(pos, thorough, unreachableNames)
   local seeds = {}
 
   nav.turnLeft()
   local leftHeading = nav.getPosition().heading
   local left = nav.inspectFront()
   if left.present then
-    print("vertical: spotted " .. left.name .. " to the left" .. (isValuable(left.name) and " (valuable)" or ""))
+    print("vertical: spotted " .. left.name .. " to the left" .. valuableTag(left.name, unreachableNames))
   end
 
   nav.turnRight(); nav.turnRight()
   local rightHeading = nav.getPosition().heading
   local right = nav.inspectFront()
   if right.present then
-    print("vertical: spotted " .. right.name .. " to the right" .. (isValuable(right.name) and " (valuable)" or ""))
+    print("vertical: spotted " .. right.name .. " to the right" .. valuableTag(right.name, unreachableNames))
   end
 
   nav.turnLeft()
 
   if thorough then
-    if left.present and isValuable(left.name) then
+    if left.present and isValuable(left.name) and not unreachableNames[left.name] then
       local d = HEADING_DELTA[leftHeading]
-      seeds[#seeds + 1] = { x = pos.x + d.dx, y = pos.y, z = pos.z + d.dz }
+      seeds[#seeds + 1] = { x = pos.x + d.dx, y = pos.y, z = pos.z + d.dz, name = left.name }
     end
-    if right.present and isValuable(right.name) then
+    if right.present and isValuable(right.name) and not unreachableNames[right.name] then
       local d = HEADING_DELTA[rightHeading]
-      seeds[#seeds + 1] = { x = pos.x + d.dx, y = pos.y, z = pos.z + d.dz }
+      seeds[#seeds + 1] = { x = pos.x + d.dx, y = pos.y, z = pos.z + d.dz, name = right.name }
     end
   end
 
@@ -300,14 +328,14 @@ local function isLiquidAhead(found, data)
   return found and nav.isLiquid(data.name)
 end
 
-local function digForward(observant, thorough, shouldStop)
+local function digForward(observant, thorough, unreachableNames, shouldStop)
   for _ = 1, MAX_DIG_ATTEMPTS do
     if not turtle.detect() or isLiquidAhead(turtle.inspect()) then
       local ok, err = nav.forward()
       if ok and observant then
-        local seeds = scanSides(nav.getPosition(), thorough)
+        local seeds = scanSides(nav.getPosition(), thorough, unreachableNames)
         if thorough and #seeds > 0 then
-          mineVein(seeds, shouldStop)
+          mineVein(seeds, shouldStop, unreachableNames)
         end
       end
       return ok, err
@@ -335,9 +363,9 @@ end
 
 -- The turtle is 1 block wide -- unlike strip.lua's 2-tall shaft, a leg
 -- only needs to clear the single cell it's moving into.
-local function tunnelForward(n, observant, thorough, shouldStop)
+local function tunnelForward(n, observant, thorough, unreachableNames, shouldStop)
   for i = 1, n do
-    if not digForward(observant, thorough, shouldStop) then return i - 1 end
+    if not digForward(observant, thorough, unreachableNames, shouldStop) then return i - 1 end
   end
   return n
 end
@@ -367,7 +395,7 @@ end
 -- the `height` cap exactly, on a clean leg boundary), "blocked" (a leg
 -- was obstructed immediately -- a side wall, not the bottom), or
 -- "interrupted" (shouldStop() cut it short).
-local function digColumn(length, stepDown, height, observant, thorough, shouldStop)
+local function digColumn(length, stepDown, height, observant, thorough, unreachableNames, shouldStop)
   local legCount = 0
   local depth = 0
 
@@ -387,7 +415,7 @@ local function digColumn(length, stepDown, height, observant, thorough, shouldSt
     depth = depth + dSteps
     if dSteps < step then return legCount, "bedrock" end
 
-    local fSteps = tunnelForward(length, observant, thorough, shouldStop)
+    local fSteps = tunnelForward(length, observant, thorough, unreachableNames, shouldStop)
     legCount = legCount + 1
     if fSteps == 0 then return legCount, "blocked" end
 
@@ -533,6 +561,12 @@ function M.run(params, shouldStop)
   local columnStart = nav.getPosition()
   local dySign = 1
   local widthIndex = 0
+  -- Block names thorough has learned it can't actually mine (undiggable
+  -- regardless of tool tier), so it stops re-chasing the same ore type
+  -- from scratch every time a later leg step or width position grazes
+  -- the same deposit again -- see mineVein() above. Persists for this
+  -- whole run; starts fresh next time the job starts.
+  local unreachableNames = {}
 
   while not (shouldStop and shouldStop()) do
     widthIndex = widthIndex + 1
@@ -559,7 +593,7 @@ function M.run(params, shouldStop)
       print(("vertical: width %d, pass facing %s starting at (%d, %d, %d)")
         :format(widthIndex, dir, columnStart.x, columnStart.y, columnStart.z))
 
-      local legCount, reason = digColumn(length, stepDown, height, observant, thorough, shouldStop)
+      local legCount, reason = digColumn(length, stepDown, height, observant, thorough, unreachableNames, shouldStop)
       print(("vertical: width %d pass done -- %d legs (%s), climbing back to start")
         :format(widthIndex, legCount, reason))
 

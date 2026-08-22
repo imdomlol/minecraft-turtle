@@ -704,6 +704,18 @@ Three optional boolean modes, all default `true`:
   always happens regardless of how the search ended, since the leg's own
   step-accounting depends on landing back exactly where it left off.
 
+  If chasing a spotted block turns out to be impossible — undiggable
+  regardless of tool tier (e.g. a modded end-game ore that needs a
+  better pickaxe than this turtle has) — `thorough` remembers that
+  block's *name* for the rest of the job run and stops treating it as
+  valuable at all, rather than re-discovering and re-chasing the same ore
+  type from scratch every time a later leg step or width position grazes
+  the same (often large) deposit. `observant`'s own line for a
+  since-blacklisted name is tagged accordingly (`(valuable, but couldn't
+  be mined earlier -- skipping)`) instead of triggering another attempt.
+  This memory doesn't survive past the current job — a fresh `mine`
+  request starts with a clean slate.
+
 `shouldStop` reaches `pathfind.goto()`'s per-step check for the travel
 *to the next width position* (interrupting that is safe — it's the start
 of new work), but deliberately **not** for the climb back to a pass's own
