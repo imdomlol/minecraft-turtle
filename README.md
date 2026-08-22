@@ -661,14 +661,19 @@ bedrock blocking the way *across* at a given depth, backtracking or
 sidestepping around it before this loop even needs to try a different
 height.
 
-Checks its fuel and inventory (`lib/inventory.lua`) once per pass, before
-it starts — so twice per width position under `lengthFacing = "all"`. If
-the inventory's full and `tidy` (see below) is true, it finds a chest
+Checks fuel once per pass, before it starts — so twice per width position
+under `lengthFacing = "all"`. Checks the inventory (`lib/inventory.lua`)
+both there *and* after every successful forward leg step, so a full
+inventory gets caught within a single leg instead of potentially sitting
+full for however long the rest of a deep pass takes. If the inventory's
+full and `tidy` (see below) is true, it finds a chest
 (`lib/chestfinder.lua`, defaulting to `lib/home.lua`'s position), drops
-everything in, and returns to the position it was working on before
-continuing. If no chest can be found, or the one found can't take
-everything, or `tidy` is false, mining stops with a clear reason rather
-than discarding items or looping forever hunting for space.
+everything in, and returns to the exact position/heading it was at
+before continuing — including resuming a leg it was partway through. If
+no chest can be found, or the one found can't take everything, or `tidy`
+is false, the whole job stops with a clear reason — even if this
+happened mid-leg, deep inside a pass — rather than discarding items or
+looping forever hunting for space.
 
 Three optional boolean modes, all default `true`:
 

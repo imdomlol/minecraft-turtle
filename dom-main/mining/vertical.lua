@@ -57,14 +57,17 @@
   individual blocks -- so expect up to roughly a `length` block actions'
   worth of latency before a stop actually takes effect.
 
-  Checks inventory (and fuel) once per pass, before it starts (so twice
-  per width position under lengthFacing = "all"). If full and `tidy`
-  (see below) is true, it finds a chest (see lib/chestfinder.lua --
-  defaults to searching around lib/home.lua's position), drops
-  everything in, and returns to the position it was working on before
-  continuing. If no chest can be found, or the one found is itself too
-  full to take everything, mining stops rather than quietly discarding
-  items or looping forever hunting for space.
+  Checks inventory after every successful forward leg step, and again
+  before each pass starts (so a full inventory is caught within a single
+  leg rather than potentially waiting out an entire deep pass, but a
+  pass also never starts already full). If full and `tidy` (see below)
+  is true, it finds a chest (see lib/chestfinder.lua -- defaults to
+  searching around lib/home.lua's position), drops everything in, and
+  returns to the exact position/heading it was at before continuing. If
+  no chest can be found, or the one found is itself too full to take
+  everything, the whole job stops -- even if this happened mid-leg, deep
+  inside a pass -- rather than quietly discarding items or looping
+  forever hunting for space.
 
   Three optional boolean modes, all default true:
   - tidy: the inventory-unloading behavior described above. tidy = false
@@ -328,14 +331,70 @@ local function isLiquidAhead(found, data)
   return found and nav.isLiquid(data.name)
 end
 
-local function digForward(observant, thorough, unreachableNames, shouldStop)
+-- If the inventory's full, finds a chest and empties into it, then
+-- returns to the exact position/heading this was called from -- NOT
+-- necessarily a pass's own start; this is also called after every leg
+-- step (see digForward below), not just once per pass, so a full
+-- inventory gets caught within a single leg instead of potentially
+-- waiting out an entire deep pass. Returns true (whether or not
+-- anything actually needed unloading), or false, reason if no chest
+-- could be found (or tidy is off), or if the turtle couldn't get back to
+-- where it was. No shouldStop here either, for the same reason as
+-- returnToColumnStart/mineVein's own return-to-origin above -- the trip
+-- back is a recovery step and must finish once started, not be cut short
+-- by a stop request that arrived while it was full.
+local function unloadIfFull(tidy)
+  if not inventory.isFull() then return true end
+
+  if not tidy then
+    return false, "inventory full (tidy disabled)"
+  end
+
+  local origin = nav.getPosition()
+  print("vertical: inventory full, looking for a chest to unload into")
+  local found, reason = chestfinder.find({})
+  if not found then
+    return false, "inventory full, no chest found: " .. tostring(reason)
+  end
+
+  local emptied = inventory.dropAll(found.direction)
+  print(("vertical: unloaded %d slot(s) into chest at (%d, %d, %d)")
+    :format(emptied, found.x, found.y, found.z))
+  if inventory.isFull() then
+    return false, "chest at (" .. found.x .. "," .. found.y .. "," .. found.z .. ") couldn't take everything"
+  end
+
+  local reached, info = pathfind.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = true })
+  if not reached then
+    return false, "could not return to (" .. origin.x .. "," .. origin.y .. "," .. origin.z
+      .. ") after unloading: " .. tostring(info.reason)
+  end
+  nav.face(origin.heading)
+  return true
+end
+
+-- Third return value (`fatal`), when present, means "stop the whole job
+-- immediately, regardless of ok" -- currently only set when unloadIfFull
+-- fails mid-leg (no chest found, or one that couldn't take everything).
+-- The move itself already happened by that point (ok is still true), so
+-- the step still counts -- but there's no point digging any further with
+-- nowhere to put what comes up, and this needs to reach all the way back
+-- to M.run() to stop cleanly with a clear reason, the same as the old
+-- once-per-pass-boundary check already did.
+local function digForward(observant, thorough, tidy, unreachableNames, shouldStop)
   for _ = 1, MAX_DIG_ATTEMPTS do
     if not turtle.detect() or isLiquidAhead(turtle.inspect()) then
       local ok, err = nav.forward()
-      if ok and observant then
-        local seeds = scanSides(nav.getPosition(), thorough, unreachableNames)
-        if thorough and #seeds > 0 then
-          mineVein(seeds, shouldStop, unreachableNames)
+      if ok then
+        local unloadOk, unloadErr = unloadIfFull(tidy)
+        if not unloadOk then
+          return true, nil, unloadErr
+        end
+        if observant then
+          local seeds = scanSides(nav.getPosition(), thorough, unreachableNames)
+          if thorough and #seeds > 0 then
+            mineVein(seeds, shouldStop, unreachableNames)
+          end
         end
       end
       return ok, err
@@ -363,9 +422,11 @@ end
 
 -- The turtle is 1 block wide -- unlike strip.lua's 2-tall shaft, a leg
 -- only needs to clear the single cell it's moving into.
-local function tunnelForward(n, observant, thorough, unreachableNames, shouldStop)
+local function tunnelForward(n, observant, thorough, tidy, unreachableNames, shouldStop)
   for i = 1, n do
-    if not digForward(observant, thorough, unreachableNames, shouldStop) then return i - 1 end
+    local ok, _, fatal = digForward(observant, thorough, tidy, unreachableNames, shouldStop)
+    if fatal then return i, fatal end
+    if not ok then return i - 1 end
   end
   return n
 end
@@ -390,12 +451,15 @@ end
 -- blocks this pass descends in total before stopping on its own, even
 -- if bedrock is still further down -- nil means no cap (dig to bedrock,
 -- the old unconditional behavior). Returns legCount (how many forward
--- legs were attempted) and reason: "bedrock" (can't dig down any
--- further -- the normal unbounded end of a pass), "height limit" (hit
--- the `height` cap exactly, on a clean leg boundary), "blocked" (a leg
--- was obstructed immediately -- a side wall, not the bottom), or
--- "interrupted" (shouldStop() cut it short).
-local function digColumn(length, stepDown, height, observant, thorough, unreachableNames, shouldStop)
+-- legs were attempted), reason: "bedrock" (can't dig down any further --
+-- the normal unbounded end of a pass), "height limit" (hit the `height`
+-- cap exactly, on a clean leg boundary), "blocked" (a leg was obstructed
+-- immediately -- a side wall, not the bottom), "interrupted"
+-- (shouldStop() cut it short), or "fatal" (a mid-leg unloadIfFull()
+-- failed -- see digForward/tunnelForward above; the whole job needs to
+-- stop, not just this pass) -- and a third value carrying the fatal
+-- error string, only present when reason == "fatal".
+local function digColumn(length, stepDown, height, observant, thorough, tidy, unreachableNames, shouldStop)
   local legCount = 0
   local depth = 0
 
@@ -415,8 +479,9 @@ local function digColumn(length, stepDown, height, observant, thorough, unreacha
     depth = depth + dSteps
     if dSteps < step then return legCount, "bedrock" end
 
-    local fSteps = tunnelForward(length, observant, thorough, unreachableNames, shouldStop)
+    local fSteps, fatal = tunnelForward(length, observant, thorough, tidy, unreachableNames, shouldStop)
     legCount = legCount + 1
+    if fatal then return legCount, "fatal", fatal end
     if fSteps == 0 then return legCount, "blocked" end
 
     nav.turnRight(); nav.turnRight()
@@ -465,41 +530,6 @@ local function returnToColumnStart(columnStart)
   local climbed = tunnelUp(needed)
   if climbed < needed then
     return false, "stuck climbing back to column start"
-  end
-  return true
-end
-
--- If the inventory's full, finds a chest and empties into it, then
--- returns to columnStart. Returns true (whether or not anything actually
--- needed unloading), or false, reason if no chest could be found (or
--- tidy is off), or if the turtle couldn't get back to columnStart
--- afterward. No shouldStop here either, for the same reason as
--- returnToColumnStart above -- the trip back to columnStart is a
--- recovery step and must finish once started, not be cut short by a
--- stop request that arrived while it was full.
-local function unloadIfFull(columnStart, tidy)
-  if not inventory.isFull() then return true end
-
-  if not tidy then
-    return false, "inventory full (tidy disabled)"
-  end
-
-  print("vertical: inventory full, looking for a chest to unload into")
-  local found, reason = chestfinder.find({})
-  if not found then
-    return false, "inventory full, no chest found: " .. tostring(reason)
-  end
-
-  local emptied = inventory.dropAll(found.direction)
-  print(("vertical: unloaded %d slot(s) into chest at (%d, %d, %d)")
-    :format(emptied, found.x, found.y, found.z))
-  if inventory.isFull() then
-    return false, "chest at (" .. found.x .. "," .. found.y .. "," .. found.z .. ") couldn't take everything"
-  end
-
-  local reached, info = pathfind.goto(columnStart.x, columnStart.y, columnStart.z, { tolerance = 0, allowDig = true })
-  if not reached then
-    return false, "could not return to column start after unloading: " .. tostring(info.reason)
   end
   return true
 end
@@ -583,7 +613,7 @@ function M.run(params, shouldStop)
         end
       end
 
-      local unloadOk, unloadErr = unloadIfFull(columnStart, tidy)
+      local unloadOk, unloadErr = unloadIfFull(tidy)
       if not unloadOk then
         print("vertical: stopping -- " .. tostring(unloadErr))
         return false, unloadErr
@@ -593,7 +623,7 @@ function M.run(params, shouldStop)
       print(("vertical: width %d, pass facing %s starting at (%d, %d, %d)")
         :format(widthIndex, dir, columnStart.x, columnStart.y, columnStart.z))
 
-      local legCount, reason = digColumn(length, stepDown, height, observant, thorough, unreachableNames, shouldStop)
+      local legCount, reason, fatal = digColumn(length, stepDown, height, observant, thorough, tidy, unreachableNames, shouldStop)
       print(("vertical: width %d pass done -- %d legs (%s), climbing back to start")
         :format(widthIndex, legCount, reason))
 
@@ -601,6 +631,11 @@ function M.run(params, shouldStop)
       if not backOk then
         print("vertical: could not return to width position's start -- " .. tostring(backErr))
         return false, "could not return to width position's start: " .. tostring(backErr)
+      end
+
+      if reason == "fatal" then
+        print("vertical: stopping -- " .. tostring(fatal))
+        return false, fatal
       end
 
       if reason == "interrupted" then
