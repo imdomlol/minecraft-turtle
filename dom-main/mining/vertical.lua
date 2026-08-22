@@ -109,6 +109,7 @@ local home = dofile("/lib/home.lua")
 local inventory = dofile("/lib/inventory.lua")
 local chestfinder = dofile("/lib/chestfinder.lua")
 local ores = dofile("/lib/ores.lua")
+local fuel = dofile("/lib/fuel.lua")
 
 local M = {}
 
@@ -691,12 +692,12 @@ function M.run(params, shouldStop)
     local interrupted = false
 
     for _, dir in ipairs(lengthDirections) do
-      local fuel = turtle.getFuelLevel()
-      if fuel ~= "unlimited" and fuel < minFuel then
-        turtle.refuel()
-        fuel = turtle.getFuelLevel()
-        if fuel ~= "unlimited" and fuel < minFuel then
-          print(("vertical: stopping -- fuel %s below minimum %d"):format(tostring(fuel), minFuel))
+      local fuelLevel = turtle.getFuelLevel()
+      if fuelLevel ~= "unlimited" and fuelLevel < minFuel then
+        fuel.ensureFuel(minFuel) -- tries inventory, then front/up/down/left/right -- see lib/fuel.lua
+        fuelLevel = turtle.getFuelLevel()
+        if fuelLevel ~= "unlimited" and fuelLevel < minFuel then
+          print(("vertical: stopping -- fuel %s below minimum %d"):format(tostring(fuelLevel), minFuel))
           return false, "insufficient fuel"
         end
       end

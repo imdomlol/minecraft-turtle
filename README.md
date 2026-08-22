@@ -279,6 +279,43 @@ distributed lock for how narrow that window is (this runs once per
 turtle's lifetime, not every boot): `dofile("/lib/identity.lua").get(cfg)`
 directly if you ever need to force a re-check.
 
+## lib/fuel.lua
+
+Keeps a turtle from silently failing to move for lack of fuel. CC:Tweaked
+checks for a physical obstruction *before* checking fuel internally, so an
+out-of-fuel turtle that also happens to have something else in its way at
+that exact moment reports `"Movement obstructed"` instead of `"Out of
+fuel"` — permanently masking a fuel shortage behind what looks like a
+routine, temporary obstruction. `lib/nav.lua`'s `forward`/`back`/`up`/`down`
+call into this module before every move so that never happens:
+
+```
+dofile("/lib/fuel.lua").ensureFuel()
+```
+
+If the turtle already has fuel, this does nothing and returns `true`
+immediately. Otherwise it tries, in order: burning whatever's already in
+its own inventory (`turtle.refuel()`, repeated — one item's worth might
+not be enough), then sucking from and refueling off of any chest touching
+it right now — front, up, down, and (since turning costs no fuel, so even
+a turtle at 0 fuel can still spin in place to look) left and right too.
+It always ends up facing the way it started. Returns `true` once fuel is
+sufficient, or `false, reason` if nothing nearby helped.
+
+Takes an optional minimum fuel level (default 1, i.e. "any fuel at all").
+`nav.lua`'s movement wrappers just need enough for the one move they're
+about to attempt, so they call it bare; `dom-main/mining/vertical.lua`'s
+own pre-pass fuel check passes its actual `minFuel` target instead, since
+having 1 fuel isn't the same as having enough to keep working.
+
+This is a last-resort, no-movement rescue, not a replacement for
+`lib/chestfinder.lua`'s wider radius search — it can only reach chests
+already touching the turtle, since finding one further away would require
+moving, which is exactly what being out of fuel makes impossible.
+`vertical.lua`'s preventive fuel check calls this first and can still fall
+back on a real `chestfinder` search of its own, since that check runs
+before fuel actually reaches 0.
+
 ## lib/nav.lua
 
 A shared "where am I / what's around me" module, meant to be `dofile()`'d
@@ -324,7 +361,10 @@ routing all movement through `nav.forward()` / `nav.back()` / `nav.up()`
 / `nav.down()` / `nav.turnLeft()` / `nav.turnRight()` instead of calling
 `turtle.forward()` etc directly — they return the same values, just also
 update the tracked position on success. State lives in `/state/nav.state`,
-so it survives the OTA wipe.
+so it survives the OTA wipe. Before attempting the actual move, each of
+these four also checks fuel and tries to auto-recover it if low or empty —
+see `lib/fuel.lua` above — so a fuel shortage is always reported as
+exactly that, never masked by a coincidental "Movement obstructed."
 
 No GPS network set up? Seed a turtle's position manually (e.g. from the
 F3 debug screen) instead:

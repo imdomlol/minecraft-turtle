@@ -10,6 +10,14 @@
   instead of the raw turtle.* functions -- calling turtle.forward()
   directly desyncs the tracked position.
 
+  forward/back/up/down all check (and try to recover, see lib/fuel.lua)
+  fuel before attempting the move, rather than just calling turtle.*()
+  and taking whatever error comes back -- CC:Tweaked reports "Movement
+  obstructed" for an out-of-fuel turtle too if anything else also
+  happens to be in the way at that moment, which would otherwise mask a
+  permanent fuel shortage behind what looks like a routine, temporary
+  obstruction.
+
   State persists to /state/nav.state, which survives startup.lua's wipe.
 
   dofile() (unlike require()) always re-executes a file and hands back a
@@ -24,6 +32,8 @@
 ------------------------------------------------------------------------]]
 
 if _G.__NAV_MODULE then return _G.__NAV_MODULE end
+
+local fuel = dofile("/lib/fuel.lua")
 
 local STATE_PATH  = "/state/nav.state"
 local GPS_TIMEOUT = 2 -- seconds
@@ -201,10 +211,27 @@ function M.report(opts)
   return info
 end
 
+-- Checked at the top of every movement wrapper below, before the actual
+-- turtle.*() call: CC:Tweaked's own "Movement obstructed" check runs
+-- BEFORE its fuel check, so a turtle that's genuinely just out of fuel
+-- can report "obstructed" instead if anything else also happens to be
+-- in the way at that exact moment -- masking the real, permanent reason
+-- it can't move. Checking (and trying to recover) fuel first, ourselves,
+-- means a fuel shortage is always identified as exactly that, never
+-- mistaken for or hidden behind an obstruction. See lib/fuel.lua.
+local function ensureFuel()
+  if fuel.hasFuel() then return true end
+  local ok, reason = fuel.ensureFuel()
+  if ok then return true end
+  return false, "out of fuel (" .. tostring(reason) .. ")"
+end
+
 -- Movement wrappers: keep tracked position/heading in sync. Same return
 -- values as the underlying turtle.* call, so they drop in as replacements.
 function M.forward()
   init()
+  local fuelOk, fuelErr = ensureFuel()
+  if not fuelOk then return false, fuelErr end
   local ok, err = turtle.forward()
   if ok then
     local d = DELTA[state.heading]
@@ -216,6 +243,8 @@ end
 
 function M.back()
   init()
+  local fuelOk, fuelErr = ensureFuel()
+  if not fuelOk then return false, fuelErr end
   local ok, err = turtle.back()
   if ok then
     local d = DELTA[state.heading]
@@ -227,6 +256,8 @@ end
 
 function M.up()
   init()
+  local fuelOk, fuelErr = ensureFuel()
+  if not fuelOk then return false, fuelErr end
   local ok, err = turtle.up()
   if ok then
     state.y = state.y + 1
@@ -237,6 +268,8 @@ end
 
 function M.down()
   init()
+  local fuelOk, fuelErr = ensureFuel()
+  if not fuelOk then return false, fuelErr end
   local ok, err = turtle.down()
   if ok then
     state.y = state.y - 1

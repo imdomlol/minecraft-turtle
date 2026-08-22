@@ -15,6 +15,7 @@ remote-setup.lua
 main.lua
 
 # --- shared libraries ---------------------------------------------------
+lib/fuel.lua
 lib/nav.lua
 lib/pathfind.lua
 lib/job.lua
