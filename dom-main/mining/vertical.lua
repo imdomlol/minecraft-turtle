@@ -42,10 +42,15 @@
   instead of perfectly overlapping -- and starts again, until `width`
   positions have been done (default unlimited) or it's told to stop.
   columnDY only ever alternates between two fixed offsets (never drifts
-  through a range), so for the best spread between adjacent width
-  positions' leg depths, pick a columnDY that isn't a multiple of
-  `stepDown` or exactly `stepDown / 2` -- either of those makes the two
-  offsets equivalent (or identical) instead of genuinely interleaved.
+  through a range), so avoid picking a columnDY that's a multiple of
+  `stepDown` (including 0) -- that puts both offsets in the same phase,
+  so adjacent width positions' legs land at the exact same depths
+  (identical, not interleaved at all). Any other value interleaves to
+  some degree; `columnDY = stepDown / 2` exactly is actually the *best*
+  case when stepDown is even, not a bad one -- it spaces the two
+  offsets' combined leg depths perfectly evenly (e.g. stepDown = 2,
+  columnDY = 1 covers every single depth between two adjacent width
+  positions, the densest interleave possible).
 
   Meant to run as a lib/job.lua job (see main.lua), not called directly:
   a run long enough to be worth calling "forever" would otherwise block
@@ -119,14 +124,17 @@ local DEFAULTS = {
   -- stepDown/columnDY default differently depending on observant (see
   -- M.run() below, which resolves observant first): with observant on,
   -- it's actively scanning every block already, so a bigger stepDown
-  -- (fewer, larger descents) and a smaller columnDY stagger are fine.
-  -- With observant off, there's no active left/right scanning at all, so
-  -- a smaller stepDown (denser switchback zigzag) and a bigger columnDY
-  -- stagger lean on the geometry itself for coverage instead.
+  -- (fewer, larger descents) is fine. With observant off, there's no
+  -- active left/right scanning at all, so a smaller stepDown (denser
+  -- switchback zigzag) leans on the geometry itself for coverage
+  -- instead -- and columnDY = stepDown / 2 (1 here, since
+  -- stepDownInattentive is 2) makes two adjacent width positions'
+  -- combined leg depths land on *every* block, the densest possible
+  -- interleave (see the columnDY tuning note near M.run() below).
   stepDownObservant   = 5,
   stepDownInattentive = 2,
   columnDYObservant   = 2,
-  columnDYInattentive = 3,
+  columnDYInattentive = 1,
 }
 
 -- params.<mode> or'ing against a default breaks for an explicit `false`

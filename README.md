@@ -652,7 +652,7 @@ dofile("/lib/job.lua").stop()
   can't be brought above this.
 - `columnStep` (default 1): blocks each new width position advances,
   along `widthFacing`, from the previous one.
-- `columnDY` (default 2 with `observant`, 3 without — see `observant`
+- `columnDY` (default 2 with `observant`, 1 without — see `observant`
   below): magnitude of the *starting height* shift each new width
   position; sign alternates every time, so width positions
   march steadily outward, staggered up/down around the original height
@@ -660,9 +660,13 @@ dofile("/lib/job.lua").stop()
   between two fixed ones) rather than all starting at the same y. That
   stagger means adjacent width positions' horizontal legs also land at
   different depths instead of perfectly overlapping — **but only if
-  `columnDY` isn't a multiple of `stepDown` or exactly half of it**;
-  either of those makes the two alternating offsets equivalent (or
-  identical) instead of genuinely interleaved, defeating the point.
+  `columnDY` isn't a multiple of `stepDown` (including 0)**, which puts
+  both offsets in the same phase (identical depths, no interleaving at
+  all). Any other value interleaves to some degree; `columnDY = stepDown
+  / 2` exactly is actually the *best* case when `stepDown` is even, not
+  a bad one — it spaces the combined leg depths perfectly evenly (the
+  defaults without `observant`, `stepDown = 2` and `columnDY = 1`, cover
+  *every* depth between two adjacent width positions this way).
 
 The climb back up deliberately doesn't retrace the zigzag turn by turn —
 it just repositions horizontally (via `pathfind.goto()`, `allowDig =

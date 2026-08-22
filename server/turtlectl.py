@@ -321,11 +321,13 @@ mine's directions (must be perpendicular to each other):
                  position (west then east, or north then south) before offsetting,
                  doubling leg coverage with minimal extra backtracking
 
-mine's step sizes:
-  step-down   blocks descended per leg step within a pass (default 5)
+mine's step sizes (default 5/2 with --observant, 2/1 without -- see below):
+  step-down   blocks descended per leg step within a pass
   column-dy   start-height shift per new width position; alternates sign each
-              time -- pick a value that isn't a multiple of step-down or exactly
-              half of it, or adjacent width positions' legs won't interleave (default 2)
+              time -- avoid a value that's a multiple of step-down (including 0),
+              or adjacent width positions' legs land at identical depths instead
+              of interleaving; step-down / 2 exactly is actually the best case
+              when step-down is even, not a bad one
 
 mine's caps (default unlimited -- dig to bedrock / run forever):
   height   blocks descended per pass before resetting, instead of going to bedrock
@@ -334,7 +336,7 @@ mine's caps (default unlimited -- dig to bedrock / run forever):
 mine's three modes (all default true, --no-<mode> to disable):
   tidy       auto-unload into a chest when full, instead of just stopping
   observant  peek left/right on every leg step and every stepDown block (also
-             changes step-down/column-dy's own defaults: 5/2 with, 2/3 without)
+             changes step-down/column-dy's own defaults: 5/2 with, 2/1 without)
   thorough   chase veins of anything spotted -- up/down always, left/right only
              if observant -- works even with observant off
 
@@ -407,7 +409,7 @@ def main():
     mp.add_argument("--column-step", type=int, help="Blocks each new width position advances along --width-facing (default 1).")
     mp.add_argument("--column-dy", type=int,
                      help="Start-height shift per new width position; alternates sign each time "
-                          "(default 2 with --observant, 3 without).")
+                          "(default 2 with --observant, 1 without).")
     mp.add_argument("--tidy", action=argparse.BooleanOptionalAction, default=None,
                      help="Auto-unload into a chest when full, instead of just stopping (default true).")
     mp.add_argument("--observant", action=argparse.BooleanOptionalAction, default=None,
