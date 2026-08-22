@@ -32,6 +32,19 @@ local function dist(dx, dy, dz)
   return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
+-- Fisher-Yates shuffle, so the escape fallback below doesn't always try
+-- the exact same direction first every time it's stuck -- see its own
+-- comment for why a fixed order can loop forever.
+local function shuffled(list)
+  local copy = {}
+  for i, v in ipairs(list) do copy[i] = v end
+  for i = #copy, 2, -1 do
+    local j = math.random(i)
+    copy[i], copy[j] = copy[j], copy[i]
+  end
+  return copy
+end
+
 -- "Movement obstructed" covers both blocks and entities in CC:Tweaked, so
 -- try both dig and attack -- whichever one actually applies just no-ops.
 -- Liquids (see nav.isLiquid()) never get dug -- there's nothing to break,
@@ -110,7 +123,16 @@ end
 -- by backtracking or sidestepping first, the same as a person would --
 -- even though that step alone moves further from the target, tryOneStep
 -- runs fresh again next step, so the normal toward-target logic just
--- resumes correcting course from wherever it lands. Returns true and
+-- resumes correcting course from wherever it lands. The escape options
+-- are tried in random order (see shuffled() above) rather than a fixed
+-- one: a fixed order (e.g. always backtracking straight away from the
+-- target first) can oscillate forever between the same two cells when
+-- that first option keeps succeeding -- it undoes itself, re-encounters
+-- the exact same blocker, and "escapes" the exact same way again, next
+-- step after next step, without ever trying the sidesteps that would
+-- actually get around the obstacle. Randomizing means a repeat run of
+-- the same losing pair is exponentially unlikely rather than guaranteed.
+-- Returns true and
 -- which axis moved ("x"/"z"/"y" toward the target, or "escape" for a
 -- fallback move), or false and the most recent error if nothing at all
 -- worked.
@@ -158,7 +180,7 @@ local function tryOneStep(target, allowDig)
     escape[#escape + 1] = function() return moveY(-1, allowDig) end
   end
 
-  for _, fn in ipairs(escape) do
+  for _, fn in ipairs(shuffled(escape)) do
     local ok, err = fn()
     if ok then return true, "escape" end
     lastErr = err

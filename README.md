@@ -429,9 +429,17 @@ whichever directions are left — including moving *away* from the target
 — since a turtle boxed in by bedrock on every useful side can often
 still find a way around by backtracking or sidestepping first, the same
 as a person would, even though that step alone moves further from the
-target. This runs fresh again every step, so normal toward-target
-stepping resumes correcting course the moment it's possible again. Only
-if *that* also fails — every direction in every axis is blocked — does
+target. These fallback directions are tried in **random order**, not a
+fixed one — a fixed order that always tries backtracking (the exact
+opposite of the blocked toward-target direction) first can oscillate
+forever: that backtrack usually succeeds, which just re-presents the
+exact same blocker next step, triggering the exact same backtrack again,
+and so on, without ever trying the sidesteps that would actually clear
+it. Randomizing makes repeating the same losing pair exponentially
+unlikely instead of guaranteed. This runs fresh again every step, so
+normal toward-target stepping resumes correcting course the moment it's
+possible again. Only if *that* also fails — every direction in every
+axis is blocked — does
 it finally give up, alongside taking more than roughly 4x the starting
 distance in steps without arriving (this cap also bounds a turtle that
 keeps finding an escape but never a real way through, e.g. repeatedly
