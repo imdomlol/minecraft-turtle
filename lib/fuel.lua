@@ -8,14 +8,16 @@
 
   M.ensureFuel(minLevel): if the turtle already meets minLevel, does
   nothing and returns true immediately. Otherwise:
-    1. tries turtle.refuel() (repeatedly, since one item's worth might
-       not be enough to reach minLevel) on whatever's already in its own
-       inventory (free, instant, no movement needed).
+    1. tries turtle.refuel() against every inventory slot in turn (not
+       just whatever's currently selected -- see refuelAllSlots() below
+       for why that distinction matters), repeating a slot until it stops
+       helping, since one item's worth might not be enough to reach
+       minLevel.
     2. checks all 6 directions immediately touching it right now --
        front, up, down, then (since turning costs no fuel -- even a
        turtle at 0 fuel can still spin in place) left and right too --
-       and sucks from any that look like a chest, retrying refuel()
-       after every item pulled in.
+       and sucks from any that look like a chest, running the same
+       whole-inventory refuel check after every item pulled in.
   Returns true once fuel reaches minLevel (or is unlimited), or false,
   reason if nothing nearby was enough. Always leaves the turtle facing
   the way it started -- any left/right peek turns back before returning.
@@ -59,17 +61,47 @@ function M.hasFuel(minLevel)
   return level == "unlimited" or level >= minLevel
 end
 
--- Sucks everything out of one adjacent direction, trying to refuel after
--- each item, stopping as soon as fuel reaches minLevel. Bounded by 16
--- (inventory slot count) so a chest holding more than that doesn't get
--- pulled from forever once the inventory's already full anyway.
+-- turtle.refuel() only ever burns whatever's in the CURRENTLY SELECTED
+-- slot -- it doesn't scan the rest of the inventory on its own. That
+-- bit twice over here: the turtle's own pre-existing fuel might not
+-- happen to already be in the selected slot, and turtle.suck() drops a
+-- pulled item into whichever slot it lands in (the first empty or
+-- already-matching one), not necessarily the selected one either -- so a
+-- bare turtle.refuel() right after a successful suck() can easily be
+-- checking the wrong slot and finding nothing there, even though fuel
+-- really did just get pulled in. Everything below goes through this
+-- instead, checking every slot rather than assuming the right one's
+-- already selected. Restores the original selection before returning
+-- either way, so a caller's own selected slot isn't left disturbed.
+local function refuelAllSlots(minLevel)
+  local originalSlot = turtle.getSelectedSlot()
+  for slot = 1, 16 do
+    if turtle.getItemCount(slot) > 0 then
+      turtle.select(slot)
+      while turtle.refuel() do
+        if M.hasFuel(minLevel) then
+          turtle.select(originalSlot)
+          return true
+        end
+      end
+    end
+  end
+  turtle.select(originalSlot)
+  return M.hasFuel(minLevel)
+end
+
+-- Sucks everything out of one adjacent direction, trying to refuel from
+-- the whole inventory after each item (see refuelAllSlots() above --
+-- not just the slot the item happened to land in), stopping as soon as
+-- fuel reaches minLevel. Bounded by 16 (inventory slot count) so a chest
+-- holding more than that doesn't get pulled from forever once the
+-- inventory's already full anyway.
 local function drain(inspect, suck, minLevel)
   local found, data = inspect()
   if not (found and looksLikeChest(data.name)) then return end
   for _ = 1, 16 do
     if not suck() then return end
-    turtle.refuel()
-    if M.hasFuel(minLevel) then return end
+    if refuelAllSlots(minLevel) then return end
   end
 end
 
@@ -77,12 +109,11 @@ function M.ensureFuel(minLevel)
   minLevel = minLevel or 1
   if M.hasFuel(minLevel) then return true end
 
-  -- One item's worth of fuel might not reach minLevel -- keep burning
-  -- whatever's already in the inventory until it runs out or minLevel
-  -- is reached, rather than trying just once.
-  while turtle.refuel() do
-    if M.hasFuel(minLevel) then return true end
-  end
+  -- One item's worth of fuel might not reach minLevel, and the fuel
+  -- already in the inventory might not be in the selected slot to begin
+  -- with -- refuelAllSlots checks every slot, repeating each one until
+  -- it stops helping, rather than trying just the current selection once.
+  if refuelAllSlots(minLevel) then return true end
 
   drain(turtle.inspect, turtle.suck, minLevel)
   if M.hasFuel(minLevel) then return true end

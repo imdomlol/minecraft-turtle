@@ -305,12 +305,25 @@ dofile("/lib/fuel.lua").ensureFuel()
 
 If the turtle already has fuel, this does nothing and returns `true`
 immediately. Otherwise it tries, in order: burning whatever's already in
-its own inventory (`turtle.refuel()`, repeated — one item's worth might
-not be enough), then sucking from and refueling off of any chest touching
-it right now — front, up, down, and (since turning costs no fuel, so even
-a turtle at 0 fuel can still spin in place to look) left and right too.
-It always ends up facing the way it started. Returns `true` once fuel is
-sufficient, or `false, reason` if nothing nearby helped.
+its own inventory, then sucking from and refueling off of any chest
+touching it right now — front, up, down, and (since turning costs no
+fuel, so even a turtle at 0 fuel can still spin in place to look) left
+and right too. It always ends up facing the way it started. Returns
+`true` once fuel is sufficient, or `false, reason` if nothing nearby
+helped.
+
+Every refuel attempt goes through every inventory slot, not just a bare
+`turtle.refuel()` on whatever's currently selected — `turtle.refuel()`
+only ever burns the *currently selected* slot, and `turtle.suck()` drops
+a pulled item into whichever slot it lands in (the first empty or
+already-matching one), which is often not the one that happened to be
+selected before the trip started. A bare `turtle.refuel()` right after a
+successful suck can easily be checking the wrong slot and find nothing
+there, even though fuel really did just get pulled in — turtles have
+been observed doing exactly this: visibly pulling fuel out of a chest
+and then still reporting no fuel available. Every check here selects
+each non-empty slot in turn instead, restoring the original selection
+before returning either way.
 
 Takes an optional minimum fuel level (default 1, i.e. "any fuel at all").
 `nav.lua`'s movement wrappers just need enough for the one move they're
