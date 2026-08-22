@@ -480,6 +480,27 @@ distance in steps without arriving (this cap also bounds a turtle that
 keeps finding an escape but never a real way through, e.g. repeatedly
 backtracking between two dead-end pockets).
 
+A second, subtler oscillation survives escape randomization alone,
+though: a toward move can succeed *trivially* by walking right back onto
+the cell an escape move just retreated from (that cell is open — the
+turtle was just standing on it a moment ago), even though the real
+obstacle is still one cell further on. Reported live: a turtle depositing
+into a chest (a `allowDig = false` trip, so no digging through any of
+this) got boxed in — blocked ahead, left, and right, with the ceiling
+directly overhead blocked too — and needed to back up *one* cell before
+"up" opened up, since the ceiling only cleared one cell further back, not
+directly overhead. It correctly backed up once, but then immediately
+walked forward right back into the same pocket (a valid, always-open
+toward move — that cell's obviously clear, it just came from there) —
+forcing another retreat, forcing the same walk back in, forever, without
+ever trying "up" from the retreated-to cell. Every `tryOneStep()` call
+now also remembers the cell the *previous* call moved away from, and
+deprioritizes (never forbids outright — undoing the previous step is
+sometimes genuinely the only option) any candidate, toward or escape,
+that would step right back onto it — trying everything else in that same
+list first. That's enough for the up-then-around move to actually get
+tried instead of immediately undone.
+
 Returns `ok, info` where `info.reason` is `"arrived"`, `"stuck: <error>"`
 (every direction failed, including the escape fallback — genuinely boxed
 in), `"interrupted"` (`shouldStop()` returned true), or `"gave up: too

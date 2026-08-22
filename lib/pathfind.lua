@@ -143,59 +143,110 @@ end
 -- step after next step, without ever trying the sidesteps that would
 -- actually get around the obstacle. Randomizing means a repeat run of
 -- the same losing pair is exponentially unlikely rather than guaranteed.
--- Returns true and
--- which axis moved ("x"/"z"/"y" toward the target, or "escape" for a
--- fallback move), or false and the most recent error if nothing at all
--- worked.
-local function tryOneStep(target, allowDig)
+--
+-- `justLeft` (the position tryOneStep moved away from on the PREVIOUS
+-- call, or nil on the first) guards against a second, subtler
+-- oscillation randomizing the escape order alone doesn't fix: a toward
+-- move can succeed trivially by walking right back onto the cell an
+-- escape move just retreated from (that cell is open -- the turtle was
+-- just standing on it), even though the *real* obstacle is still one
+-- cell further on. That toward move isn't wrong on its own, but taking
+-- it immediately means the turtle never gets anywhere ELSE from the
+-- retreated-to cell (e.g. a ceiling opening up one block further back
+-- that only becomes reachable by staying put a step longer to try other
+-- axes) -- it just walks straight back into the same wall, forcing
+-- another retreat, forcing the same walk-back, forever. Any candidate
+-- (toward or escape) whose destination is exactly `justLeft` is
+-- deferred behind every other candidate in its own list instead of
+-- skipped outright -- undoing the previous step is sometimes genuinely
+-- the only option (a true one-cell-wide dead end), so it stays
+-- available as a last resort, just never taken over a candidate that
+-- would actually go somewhere new. Returns true and which axis moved
+-- ("x"/"z"/"y" toward the target, or "escape" for a fallback move), or
+-- false and the most recent error if nothing at all worked.
+local function tryOneStep(target, allowDig, justLeft)
   local pos = nav.getPosition()
   local dx, dy, dz = target.x - pos.x, target.y - pos.y, target.z - pos.z
 
+  local function isJustLeft(nx, ny, nz)
+    return justLeft ~= nil and justLeft.x == nx and justLeft.y == ny and justLeft.z == nz
+  end
+
   local toward = {}
   if dx ~= 0 then
-    toward[#toward + 1] = { axis = "x", amount = math.abs(dx), fn = function() return moveX(dx > 0 and 1 or -1, allowDig) end }
+    local sign = dx > 0 and 1 or -1
+    toward[#toward + 1] = { axis = "x", amount = math.abs(dx), nx = pos.x + sign, ny = pos.y, nz = pos.z,
+      fn = function() return moveX(sign, allowDig) end }
   end
   if dz ~= 0 then
-    toward[#toward + 1] = { axis = "z", amount = math.abs(dz), fn = function() return moveZ(dz > 0 and 1 or -1, allowDig) end }
+    local sign = dz > 0 and 1 or -1
+    toward[#toward + 1] = { axis = "z", amount = math.abs(dz), nx = pos.x, ny = pos.y, nz = pos.z + sign,
+      fn = function() return moveZ(sign, allowDig) end }
   end
   if dy ~= 0 then
-    toward[#toward + 1] = { axis = "y", amount = math.abs(dy), fn = function() return moveY(dy > 0 and 1 or -1, allowDig) end }
+    local sign = dy > 0 and 1 or -1
+    toward[#toward + 1] = { axis = "y", amount = math.abs(dy), nx = pos.x, ny = pos.y + sign, nz = pos.z,
+      fn = function() return moveY(sign, allowDig) end }
   end
 
   table.sort(toward, function(a, b) return a.amount > b.amount end)
 
-  local lastErr
-  for _, c in ipairs(toward) do
-    local ok, err = c.fn()
-    if ok then return true, c.axis end
-    lastErr = err
-  end
-
   local escape = {}
   if dx ~= 0 then
-    escape[#escape + 1] = function() return moveX(dx > 0 and -1 or 1, allowDig) end
+    local sign = dx > 0 and -1 or 1
+    escape[#escape + 1] = { axis = "escape", nx = pos.x + sign, ny = pos.y, nz = pos.z,
+      fn = function() return moveX(sign, allowDig) end }
   else
-    escape[#escape + 1] = function() return moveX(1, allowDig) end
-    escape[#escape + 1] = function() return moveX(-1, allowDig) end
+    escape[#escape + 1] = { axis = "escape", nx = pos.x + 1, ny = pos.y, nz = pos.z, fn = function() return moveX(1, allowDig) end }
+    escape[#escape + 1] = { axis = "escape", nx = pos.x - 1, ny = pos.y, nz = pos.z, fn = function() return moveX(-1, allowDig) end }
   end
   if dz ~= 0 then
-    escape[#escape + 1] = function() return moveZ(dz > 0 and -1 or 1, allowDig) end
+    local sign = dz > 0 and -1 or 1
+    escape[#escape + 1] = { axis = "escape", nx = pos.x, ny = pos.y, nz = pos.z + sign,
+      fn = function() return moveZ(sign, allowDig) end }
   else
-    escape[#escape + 1] = function() return moveZ(1, allowDig) end
-    escape[#escape + 1] = function() return moveZ(-1, allowDig) end
+    escape[#escape + 1] = { axis = "escape", nx = pos.x, ny = pos.y, nz = pos.z + 1, fn = function() return moveZ(1, allowDig) end }
+    escape[#escape + 1] = { axis = "escape", nx = pos.x, ny = pos.y, nz = pos.z - 1, fn = function() return moveZ(-1, allowDig) end }
   end
   if dy ~= 0 then
-    escape[#escape + 1] = function() return moveY(dy > 0 and -1 or 1, allowDig) end
+    local sign = dy > 0 and -1 or 1
+    escape[#escape + 1] = { axis = "escape", nx = pos.x, ny = pos.y + sign, nz = pos.z,
+      fn = function() return moveY(sign, allowDig) end }
   else
-    escape[#escape + 1] = function() return moveY(1, allowDig) end
-    escape[#escape + 1] = function() return moveY(-1, allowDig) end
+    escape[#escape + 1] = { axis = "escape", nx = pos.x, ny = pos.y + 1, nz = pos.z, fn = function() return moveY(1, allowDig) end }
+    escape[#escape + 1] = { axis = "escape", nx = pos.x, ny = pos.y - 1, nz = pos.z, fn = function() return moveY(-1, allowDig) end }
   end
 
-  for _, fn in ipairs(shuffled(escape)) do
-    local ok, err = fn()
-    if ok then return true, "escape" end
-    lastErr = err
+  local lastErr
+
+  -- Tries every candidate in `list`, in order, except ones landing back
+  -- on justLeft -- those are deferred to a second pass instead of
+  -- skipped outright, so undoing the previous step stays available as a
+  -- last resort within this same list.
+  local function attempt(list)
+    local deferred = {}
+    for _, c in ipairs(list) do
+      if isJustLeft(c.nx, c.ny, c.nz) then
+        deferred[#deferred + 1] = c
+      else
+        local ok, err = c.fn()
+        if ok then return true, c.axis end
+        lastErr = err
+      end
+    end
+    for _, c in ipairs(deferred) do
+      local ok, err = c.fn()
+      if ok then return true, c.axis end
+      lastErr = err
+    end
+    return false
   end
+
+  local ok, axis = attempt(toward)
+  if ok then return true, axis end
+
+  ok, axis = attempt(shuffled(escape))
+  if ok then return true, axis end
 
   return false, nil, lastErr
 end
@@ -244,6 +295,12 @@ function M.goto(x, y, z, opts)
   print(("pathfind: heading to (%d, %d, %d), tolerance=%d, allowDig=%s")
     :format(x, y, z, tolerance, tostring(allowDig)))
 
+  -- The position the previous step moved away from, passed to
+  -- tryOneStep so it can deprioritize (not forbid -- see its own
+  -- comment) immediately undoing that step. nil for the first step,
+  -- since there's nothing to avoid undoing yet.
+  local justLeft = nil
+
   for _ = 1, maxSteps do
     if shouldStop and shouldStop() then
       pos = nav.getPosition()
@@ -260,11 +317,12 @@ function M.goto(x, y, z, opts)
       return true, { reason = "arrived", distance = d, position = pos }
     end
 
-    local moved, _, err = tryOneStep(target, allowDig)
+    local moved, _, err = tryOneStep(target, allowDig, justLeft)
     if not moved then
       print("pathfind: stuck -- " .. tostring(err))
       return false, { reason = "stuck: " .. tostring(err), distance = d, position = nav.getPosition() }
     end
+    justLeft = pos
   end
 
   pos = nav.getPosition()
