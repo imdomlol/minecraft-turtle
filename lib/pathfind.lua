@@ -8,7 +8,9 @@
   tries to move that way, falling back to the other axes if that move
   fails. Optionally digs/attacks through whatever's blocking it -- except
   liquids (lib/nav.lua's isLiquid()), which it never digs, since a turtle
-  can already move straight through one. If every axis that would make
+  can already move straight through one, and, unless opts.allowDig is
+  specifically "all", chests (lib/nav.lua's isChest()) either, which it
+  routes around instead -- see digMode() below. If every axis that would make
   progress toward the target is blocked, it falls back further still to
   whatever's left -- including backtracking -- since a turtle boxed in on
   every useful side (bedrock is undiggable regardless of allowDig) can
@@ -45,17 +47,26 @@ local function shuffled(list)
   return copy
 end
 
+-- Whether to skip dig()/attack() and go straight to retrying the move
+-- instead: true for liquids (nothing to break, and a turtle can already
+-- move straight through one) always, and for chests specifically when
+-- allowDig is "safe" rather than "all" -- see M.goto's opts.allowDig doc
+-- for why "safe" exists and is the default whenever digging is on at
+-- all.
+local function shouldSkipDig(found, data, allowDig)
+  if not found then return false end
+  if nav.isLiquid(data.name) then return true end
+  return allowDig == "safe" and nav.isChest(data.name)
+end
+
 -- "Movement obstructed" covers both blocks and entities in CC:Tweaked, so
 -- try both dig and attack -- whichever one actually applies just no-ops.
--- Liquids (see nav.isLiquid()) never get dug -- there's nothing to break,
--- and a turtle can already move straight through one -- so this skips
--- straight to retrying the move instead of wasting a dig attempt on it.
 local function stepForward(allowDig)
   local ok, err = nav.forward()
   if ok then return true end
   if allowDig then
     local found, data = turtle.inspect()
-    if not (found and nav.isLiquid(data.name)) then
+    if not shouldSkipDig(found, data, allowDig) then
       turtle.dig()
       turtle.attack()
     end
@@ -70,7 +81,7 @@ local function stepUp(allowDig)
   if ok then return true end
   if allowDig then
     local found, data = turtle.inspectUp()
-    if not (found and nav.isLiquid(data.name)) then
+    if not shouldSkipDig(found, data, allowDig) then
       turtle.digUp()
       turtle.attackUp()
     end
@@ -85,7 +96,7 @@ local function stepDown(allowDig)
   if ok then return true end
   if allowDig then
     local found, data = turtle.inspectDown()
-    if not (found and nav.isLiquid(data.name)) then
+    if not shouldSkipDig(found, data, allowDig) then
       turtle.digDown()
       turtle.attackDown()
     end
@@ -189,10 +200,26 @@ local function tryOneStep(target, allowDig)
   return false, nil, lastErr
 end
 
+-- Normalizes opts.allowDig into exactly one of: false (never dig), "safe"
+-- (dig/attack through obstacles, but route around a chest instead of
+-- destroying it -- the default the moment digging is on at all, since a
+-- dig-through job has no way to tell a player's storage chest apart from
+-- any other obstacle otherwise), or "all" (dig through anything, chests
+-- included -- an explicit opt-in for when that's really what's wanted).
+-- Bare `true` (from before "safe"/"all" existed) is treated as "safe",
+-- so old callers passing a boolean keep working, just chest-protected now.
+local function digMode(allowDig)
+  if allowDig == "all" then return "all" end
+  if allowDig then return "safe" end
+  return false
+end
+
 -- Moves toward (x, y, z) until within `opts.tolerance` blocks of it
 -- (default 0, i.e. exact) or it gives up. opts.allowDig (default false)
--- controls whether it digs/attacks through obstacles or just routes
--- around them via the other axes. opts.shouldStop, if given, is checked
+-- is false, "safe", or "all" -- see digMode() above -- controlling
+-- whether it digs/attacks through obstacles at all, and if so, whether a
+-- chest is fair game or routed around like an undiggable block.
+-- opts.shouldStop, if given, is checked
 -- before every single step (the finest granularity anything in this repo
 -- uses -- unlike e.g. dom-main/mining/vertical.lua's own per-column
 -- check, a stuck or merely slow multi-hundred-block trip can otherwise
@@ -206,7 +233,7 @@ end
 function M.goto(x, y, z, opts)
   opts = opts or {}
   local tolerance = opts.tolerance or 0
-  local allowDig = opts.allowDig or false
+  local allowDig = digMode(opts.allowDig)
   local shouldStop = opts.shouldStop
   local target = { x = x, y = y, z = z }
 

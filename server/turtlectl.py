@@ -13,7 +13,7 @@ Usage:
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
 jobs vs plain calls -- these build the right dofile(...) command for you:
-  turtlectl.py goto <id> <x> <y> <z> [--tolerance N] [--dig]
+  turtlectl.py goto <id> <x> <y> <z> [--tolerance N] [--dig [safe|all]]
   turtlectl.py mine <id> [--width-facing north|east|south|west]
                          [--length-facing north|east|south|west|all]
                          [--length N] [--step-down N] [--height N] [--width N]
@@ -26,13 +26,21 @@ jobs vs plain calls -- these build the right dofile(...) command for you:
   turtlectl.py turnleft <id>
   turtlectl.py turnright <id>
   turtlectl.py inv <id>
-  turtlectl.py home <id> [--dig]      -- go to the marked home position
+  turtlectl.py home <id> [--dig [safe|all]]  -- go to the marked home position
   turtlectl.py markhome <id>          -- mark the current position as home
   turtlectl.py findchest <id> [--x N --y N --z N] [--radius N]
   turtlectl.py dump <id> [--x N --y N --z N] [--radius N]
                          -- find a chest and empty the inventory into it; no
                          -- coords searches near the turtle (radius 8 default),
                          -- coords with no radius means exactly there (radius 0)
+
+--dig on its own (or --dig safe) never digs through a chest -- it routes
+around one like any other obstacle it can't clear, since a dig-through
+trip has no way to tell a player's storage chest apart from ordinary
+terrain otherwise. --dig all is a deliberate opt-in to dig through a
+chest too, for when that's really what's wanted. Mining (`mine`) has no
+--dig switch at all since it always digs by nature, but is chest-safe
+unconditionally -- it always routes around a chest in its path.
 
 All of the above accept --wait (and --wait-timeout, default 120s) to
 block and print the result once it completes, instead of just queuing
@@ -116,6 +124,15 @@ def lua_bool(b):
     return "true" if b else "false"
 
 
+def lua_dig(mode):
+    """mode is None (no --dig -- never dig), "safe" (dig, but never a
+    chest -- the default the instant --dig is given at all), or "all"
+    (dig through anything, chests included -- an explicit opt-in)."""
+    if mode is None:
+        return "false"
+    return f'"{mode}"'
+
+
 def facing_lua(facing):
     """facing is either a heading number (0-3) or a compass name -- pass
     numbers through bare, quote everything else so Lua sees a string."""
@@ -133,9 +150,9 @@ def build_shortcut(cmd, ns):
         command = (
             'dofile("/lib/job.lua").request("goto", { '
             f'x = {ns.x}, y = {ns.y}, z = {ns.z}, '
-            f'tolerance = {ns.tolerance}, allowDig = {lua_bool(ns.dig)} }})'
+            f'tolerance = {ns.tolerance}, allowDig = {lua_dig(ns.dig)} }})'
         )
-        return f"goto ({ns.x}, {ns.y}, {ns.z}) tolerance={ns.tolerance} dig={ns.dig}", command
+        return f"goto ({ns.x}, {ns.y}, {ns.z}) tolerance={ns.tolerance} dig={ns.dig or 'off'}", command
 
     if cmd == "mine":
         fields = []
@@ -182,8 +199,8 @@ def build_shortcut(cmd, ns):
         return "inventory report", 'return dofile("/lib/inventory.lua").report()'
 
     if cmd == "home":
-        command = f'return dofile("/lib/home.lua").go({{ allowDig = {lua_bool(ns.dig)} }})'
-        return f"go home dig={ns.dig}", command
+        command = f'return dofile("/lib/home.lua").go({{ allowDig = {lua_dig(ns.dig)} }})'
+        return f"go home dig={ns.dig or 'off'}", command
 
     if cmd == "markhome":
         return "mark current position as home", 'return dofile("/lib/home.lua").mark()'
@@ -240,7 +257,7 @@ def build_console_parser():
     gp.add_argument("y", type=int)
     gp.add_argument("z", type=int)
     gp.add_argument("--tolerance", type=int, default=0)
-    gp.add_argument("--dig", action="store_true")
+    gp.add_argument("--dig", nargs="?", const="safe", choices=["safe", "all"], default=None)
 
     mp = sub.add_parser("mine", add_help=False)
     mp.add_argument("--width-facing", choices=["north", "east", "south", "west"])
@@ -274,7 +291,7 @@ def build_console_parser():
     sub.add_parser("inv", add_help=False)
 
     hp = sub.add_parser("home", add_help=False)
-    hp.add_argument("--dig", action="store_true")
+    hp.add_argument("--dig", nargs="?", const="safe", choices=["safe", "all"], default=None)
 
     sub.add_parser("markhome", add_help=False)
 
@@ -295,7 +312,7 @@ def build_console_parser():
 
 CONSOLE_HELP = """\
 shortcuts (id and --wait are implied -- you're already watching this turtle live):
-  goto <x> <y> <z> [--tolerance N] [--dig]     move to (x, y, z) as a background job
+  goto <x> <y> <z> [--tolerance N] [--dig [safe|all]]  move to (x, y, z) as a background job
   mine [--width-facing north|east|south|west] [--length-facing north|east|south|west|all]
        [--length N] [--step-down N] [--height N] [--width N] [--min-fuel N]
        [--column-step N] [--column-dy N] [--no-tidy] [--no-observant] [--no-thorough]
@@ -307,12 +324,18 @@ shortcuts (id and --wait are implied -- you're already watching this turtle live
   turnleft                                     turn left 90 degrees
   turnright                                    turn right 90 degrees
   inv                                          report inventory contents
-  home [--dig]                                 go to the marked home position
+  home [--dig [safe|all]]                      go to the marked home position
   markhome                                     mark the current position as home
   findchest [--x N --y N --z N] [--radius N]   search for a nearby chest
   dump [--x N --y N --z N] [--radius N]        find a chest and empty the inventory into it
                                                 (see below for how --x/--y/--z and --radius interact)
   help                                         show this list
+
+--dig safe (bare --dig's default) routes around a chest instead of digging
+it, since a dig-through trip can't otherwise tell a player's storage chest
+apart from ordinary terrain; --dig all is an explicit opt-in to dig through
+one too. mine has no --dig switch (it always digs) but is chest-safe the
+same way, unconditionally.
 
 mine's directions (must be perpendicular to each other):
   width-facing   direction the mine advances in over time (default north)
@@ -389,7 +412,10 @@ def main():
     gp.add_argument("y", type=int)
     gp.add_argument("z", type=int)
     gp.add_argument("--tolerance", type=int, default=0)
-    gp.add_argument("--dig", action="store_true", help="Dig/attack through obstacles.")
+    gp.add_argument("--dig", nargs="?", const="safe", choices=["safe", "all"], default=None,
+                     help="Dig/attack through obstacles. Bare --dig (or --dig safe) never "
+                          "digs a chest, routing around it instead; --dig all digs through "
+                          "one too, as a deliberate opt-in.")
 
     mp = sub.add_parser("mine", parents=[waitp], help="Start the vertical strip miner.")
     mp.add_argument("id")
@@ -449,7 +475,10 @@ def main():
 
     hp = sub.add_parser("home", parents=[waitp], help="Go to the marked home position.")
     hp.add_argument("id")
-    hp.add_argument("--dig", action="store_true", help="Dig/attack through obstacles.")
+    hp.add_argument("--dig", nargs="?", const="safe", choices=["safe", "all"], default=None,
+                     help="Dig/attack through obstacles. Bare --dig (or --dig safe) never "
+                          "digs a chest, routing around it instead; --dig all digs through "
+                          "one too, as a deliberate opt-in.")
 
     mhp = sub.add_parser("markhome", parents=[waitp], help="Mark the current position as home.")
     mhp.add_argument("id")

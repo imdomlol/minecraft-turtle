@@ -134,6 +134,16 @@ function M.isLiquid(name)
   return name:find("water") ~= nil or name:find("lava") ~= nil
 end
 
+-- Is a block name a chest (any variant -- trapped, modded, etc). Used by
+-- lib/pathfind.lua's "safe" dig mode to route around a chest instead of
+-- destroying it, since a dig-through job (mining, a --dig goto) has no
+-- way to tell a player's storage chest apart from any other obstacle
+-- otherwise.
+function M.isChest(name)
+  if not name then return false end
+  return name:lower():find("chest", 1, true) ~= nil
+end
+
 -- Spins through all 4 compass headings -- exactly 4 turnRight()s, so it
 -- always ends up back at the heading it started with -- inspecting front
 -- at each one, plus up/down: the full 6-block "shell" around the turtle,

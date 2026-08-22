@@ -273,7 +273,7 @@ local function mineVein(seeds, shouldStop, unreachableNames)
     local key = target.x .. "," .. target.y .. "," .. target.z
     if not visited[key] then
       visited[key] = true
-      local reached = pathfind.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = true })
+      local reached = pathfind.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = "safe" })
       if reached then
         mined = mined + 1
         for _, delta in ipairs(NEIGHBOR_DELTAS) do
@@ -297,7 +297,7 @@ local function mineVein(seeds, shouldStop, unreachableNames)
     print(("vertical: chased a vein for %d block(s)"):format(mined))
   end
 
-  pathfind.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = true })
+  pathfind.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = "safe" })
   nav.face(origin.heading)
 end
 
@@ -389,6 +389,15 @@ local function isLiquidAhead(found, data)
   return found and nav.isLiquid(data.name)
 end
 
+-- Mining always digs -- there's no allowDig switch to opt out of it, the
+-- way lib/pathfind.lua's travel has -- so a chest is refused unconditionally
+-- rather than offering an "all" mode to plow through it: nothing here
+-- should ever be able to destroy a player's storage chest just because it
+-- happened to be in the path of a mining pass.
+local function isChestAhead(found, data)
+  return found and nav.isChest(data.name)
+end
+
 -- If the inventory's full, finds a chest and empties into it, then
 -- returns to the exact position/heading this was called from -- NOT
 -- necessarily a pass's own start; this is also called after every leg
@@ -422,7 +431,7 @@ local function unloadIfFull(tidy)
     return false, "chest at (" .. found.x .. "," .. found.y .. "," .. found.z .. ") couldn't take everything"
   end
 
-  local reached, info = pathfind.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = true })
+  local reached, info = pathfind.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = "safe" })
   if not reached then
     return false, "could not return to (" .. origin.x .. "," .. origin.y .. "," .. origin.z
       .. ") after unloading: " .. tostring(info.reason)
@@ -447,7 +456,8 @@ end
 -- gate whether thorough is allowed to act.
 local function digForward(observant, thorough, tidy, unreachableNames, shouldStop)
   for _ = 1, MAX_DIG_ATTEMPTS do
-    if not turtle.detect() or isLiquidAhead(turtle.inspect()) then
+    local found, data = turtle.inspect()
+    if not found or isLiquidAhead(found, data) then
       local ok, err = nav.forward()
       if ok then
         local unloadOk, unloadErr = unloadIfFull(tidy)
@@ -467,6 +477,9 @@ local function digForward(observant, thorough, tidy, unreachableNames, shouldSto
       end
       return ok, err
     end
+    if isChestAhead(found, data) then
+      return false, "chest in the way -- refusing to dig through it"
+    end
     if not turtle.dig() then turtle.attack() end
   end
   return false, "obstructed after " .. MAX_DIG_ATTEMPTS .. " dig attempts"
@@ -480,7 +493,8 @@ end
 -- pass's leg-boundary depths.
 local function digDown(observant, thorough, unreachableNames, shouldStop)
   for _ = 1, MAX_DIG_ATTEMPTS do
-    if not turtle.detectDown() or isLiquidAhead(turtle.inspectDown()) then
+    local found, data = turtle.inspectDown()
+    if not found or isLiquidAhead(found, data) then
       local ok, err = nav.down()
       if ok and observant then
         local seeds = scanLeftRight(nav.getPosition(), thorough, unreachableNames)
@@ -490,6 +504,9 @@ local function digDown(observant, thorough, unreachableNames, shouldStop)
       end
       return ok, err
     end
+    if isChestAhead(found, data) then
+      return false, "chest in the way -- refusing to dig through it"
+    end
     if not turtle.digDown() then turtle.attackDown() end
   end
   return false, "obstructed after " .. MAX_DIG_ATTEMPTS .. " dig attempts"
@@ -497,7 +514,11 @@ end
 
 local function digUp()
   for _ = 1, MAX_DIG_ATTEMPTS do
-    if not turtle.detectUp() or isLiquidAhead(turtle.inspectUp()) then return nav.up() end
+    local found, data = turtle.inspectUp()
+    if not found or isLiquidAhead(found, data) then return nav.up() end
+    if isChestAhead(found, data) then
+      return false, "chest in the way -- refusing to dig through it"
+    end
     if not turtle.digUp() then turtle.attackUp() end
   end
   return false, "obstructed after " .. MAX_DIG_ATTEMPTS .. " dig attempts"
@@ -594,7 +615,7 @@ local function returnToColumnStart(columnStart)
   local pos = nav.getPosition()
 
   while true do
-    local reached, info = pathfind.goto(columnStart.x, pos.y, columnStart.z, { tolerance = 0, allowDig = true })
+    local reached, info = pathfind.goto(columnStart.x, pos.y, columnStart.z, { tolerance = 0, allowDig = "safe" })
     if reached then break end
 
     if pos.y >= columnStart.y then
@@ -757,7 +778,7 @@ function M.run(params, shouldStop)
     -- travel above) is safe to interrupt: this is "start of the next
     -- unit of work", not a safety step recovering from one already in
     -- progress, so it's fine for a fresh stop request to cut it short.
-    local reached, info = pathfind.goto(nextX, nextY, nextZ, { tolerance = 0, allowDig = true, shouldStop = shouldStop })
+    local reached, info = pathfind.goto(nextX, nextY, nextZ, { tolerance = 0, allowDig = "safe", shouldStop = shouldStop })
     if not reached then
       if info.reason == "interrupted" then
         print("vertical: interrupted while moving to the next width position")

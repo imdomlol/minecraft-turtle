@@ -68,7 +68,8 @@ end
 -- duration the way running dofile("/lib/pathfind.lua").goto(...) as a
 -- plain command does -- that starves the poll loop of answering
 -- anything else, even a quick nav.report(), until the trip finishes.
--- Params: x, y, z, tolerance (default 0), allowDig (default false).
+-- Params: x, y, z, tolerance (default 0), allowDig (default false; false,
+-- "safe", or "all" -- see lib/pathfind.lua's digMode()).
 -- shouldStop is passed straight through to pathfind.goto(), which checks
 -- it before every single step -- so dofile("/lib/job.lua").stop() (or
 -- switching to a different job) now interrupts a "goto" job almost

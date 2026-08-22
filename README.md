@@ -211,13 +211,14 @@ before dumping everything at once at the end.
 ### Shortcuts for common calls
 
 Typing out `dofile("/lib/job.lua").request("goto", { x = -89, y = 55, z
-= -87, allowDig = true })` from memory is a lot to ask — and it's easy to
-forget which lib/*.lua file a call lives in, or whether it's a background
-job (`request`/`stop`) versus a plain call. `turtlectl.py` has shortcuts
-that build the right command for you:
+= -87, allowDig = "safe" })` from memory is a lot to ask — and it's easy
+to forget which lib/*.lua file a call lives in, or whether it's a
+background job (`request`/`stop`) versus a plain call. `turtlectl.py` has
+shortcuts that build the right command for you:
 
 ```
-python3 server/turtlectl.py goto Lux -89 55 -87 --dig          # background job, cancellable
+python3 server/turtlectl.py goto Lux -89 55 -87 --dig          # background job, cancellable (--dig alone means "safe" -- see below)
+python3 server/turtlectl.py goto Lux -89 55 -87 --dig all       # dig through a chest too, not just route around it
 python3 server/turtlectl.py mine Lux --width-facing west --length 12   # any omitted flag keeps its default
 python3 server/turtlectl.py mine Lux --length-facing all --height 40 --width 20
 python3 server/turtlectl.py mine Lux --no-tidy --no-observant  # --tidy/--observant/--thorough, all default true
@@ -235,6 +236,15 @@ python3 server/turtlectl.py findchest Lux --radius 12           # or --x/--y/--z
 python3 server/turtlectl.py dump Lux                            # find a chest nearby (radius 8) and empty into it
 python3 server/turtlectl.py dump Lux --x 100 --y 64 --z -200    # a known chest location (exact by default)
 ```
+
+`--dig` on `goto`/`home` takes an optional mode: bare `--dig` (same as
+`--dig safe`) digs/attacks through obstacles but never destroys a chest —
+it routes around one instead, the same as it would an undiggable block —
+since a dig-through trip has no way to tell a player's storage chest
+apart from ordinary terrain otherwise. `--dig all` is an explicit opt-in
+to dig through a chest too. `mine` has no `--dig` flag at all (it always
+digs, by nature), but is chest-safe unconditionally regardless — it
+always routes around a chest in its path rather than destroying it.
 
 Every shortcut above also takes `--wait` (block and print the result once
 it completes — no separate `results`/`console` lookup for a quick check)
@@ -394,19 +404,31 @@ nothing useful anyway (there's no block to break). Used by
 moving instead of wasting a dig attempt whenever the thing in the way
 turns out to be a liquid.
 
+`nav.isChest(name)` — is a block name any chest variant (trapped, modded,
+etc). Used by `lib/pathfind.lua`'s `"safe"` dig mode and by
+`dom-main/mining/vertical.lua`'s own tunnel digging to recognize a chest
+and route around it instead of destroying it — see both sections below.
+
 ## lib/pathfind.lua
 
 Moves the turtle toward a target position, digging/attacking through
 obstacles only if you allow it:
 
 ```
-dofile("/lib/pathfind.lua").goto(-1358, 65, -4337, { tolerance = 1, allowDig = false })
+dofile("/lib/pathfind.lua").goto(-1358, 65, -4337, { tolerance = 1, allowDig = "safe" })
 ```
 
 - `tolerance` (default `0`): stop once within this many blocks of the
   target, rather than requiring an exact arrival.
-- `allowDig` (default `false`): if the direct route is blocked, dig/attack
-  through it instead of only trying to route around via the other axes.
+- `allowDig` (default `false`): `false`, `"safe"`, or `"all"`. `false`
+  never digs — blocked means blocked, route around via the other axes or
+  give up. `"safe"` digs/attacks through obstacles, same as before this
+  distinction existed (a bare `true` is still accepted, as an alias for
+  `"safe"`, so old callers keep working), *except* a chest — that gets
+  routed around instead, same as an undiggable block, since a dig-through
+  trip has no way to tell a player's storage chest apart from ordinary
+  terrain otherwise. `"all"` is an explicit opt-in to dig through a chest
+  too, for when that's genuinely what's wanted.
 - `shouldStop` (optional, a `function() -> boolean`): checked before
   every single step — the finest-grained interruption point in this
   repo. A multi-hundred-block trip (or a merely slow one) would otherwise
@@ -503,7 +525,7 @@ starves the poll loop of answering *anything* else, even a quick
 `nav.report()`, until the whole trip finishes):
 
 ```
-dofile("/lib/job.lua").request("goto", { x = -89, y = 70, z = -87, allowDig = true })
+dofile("/lib/job.lua").request("goto", { x = -89, y = 70, z = -87, allowDig = "safe" })
 ```
 
 Same params as `pathfind.goto()` (`x`, `y`, `z`, `tolerance`,
@@ -718,12 +740,20 @@ dofile("/lib/job.lua").stop()
 
 The climb back up deliberately doesn't retrace the zigzag turn by turn —
 it just repositions horizontally (via `pathfind.goto()`, `allowDig =
-true`) and digs straight up. That does mean the turtle isn't guaranteed
+"safe"`) and digs straight up. That does mean the turtle isn't guaranteed
 to end up facing the same direction it started the pass facing, unlike
 the horizontal-shaft `strip.lua`. Travel *between* width positions, over
 already-surveyed ground, also uses `pathfind.goto()` with `allowDig =
-true` — so a stray surface obstacle can't stall an unattended run; edit
+"safe"` — so a stray surface obstacle can't stall an unattended run; edit
 the file if you'd rather it stop and wait instead.
+
+Mining never destroys a chest — not just this repositioning travel
+(`"safe"` mode already routes around one, same as `goto`/`home` do), but
+the actual ore-digging tunnel too, which has no `allowDig` switch to
+begin with (mining always digs, by nature) and refuses a chest
+unconditionally: hitting one mid-leg stops just that leg with a clear
+"chest in the way" reason instead of consuming it, the same as running
+into undiggable bedrock would. See `nav.isChest()` above.
 
 Real bedrock near the world floor is patchy, not a clean plane, and is
 undiggable regardless of `allowDig` — so the horizontal repositioning
