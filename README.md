@@ -685,9 +685,10 @@ Three optional boolean modes, all default `true`:
 - `thorough`: chases down veins of anything `observant` spots (any block
   name containing `_ore` anywhere, plus `ancient_debris` — broad on
   purpose, so a modded server's ore naming, including a trailing
-  variant/suffix after `_ore` itself, mostly gets picked up too) instead
-  of leaving it for a neighboring leg or width position to maybe stumble
-  into later. **`thorough` only ever acts on what `observant` finds**, so
+  variant/suffix after `_ore` itself, mostly gets picked up too — see
+  `lib/ores.lua` below for exceptions) instead of leaving it for a
+  neighboring leg or width position to maybe stumble into later.
+  **`thorough` only ever acts on what `observant` finds**, so
   it has no effect with `observant = false` — it doesn't separately
   re-inspect the block a leg is about to dig through, since by the time a
   vein is spotted that way the turtle's already committed to consuming it
@@ -721,3 +722,36 @@ Marks `lib/home.lua`'s position on first start if nothing's marked yet
 (so the very first width position's top survives a mid-run reboot), but
 tracks every later width position's own top locally — `home` only
 remembers one position, and every width position needs its own.
+
+## lib/ores.lua
+
+Two plain lists, edited directly (no code changes needed) to override
+`thorough`'s `_ore`/`ancient_debris` block-name matching (see above) —
+for whenever a block should or shouldn't count as valuable, but doesn't
+fit that pattern:
+
+```lua
+return {
+  INCLUDE = {
+    -- "silentgear:blasting_ore",
+  },
+  EXCLUDE = {
+    -- "somemod:decorative_ore_block",
+  },
+}
+```
+
+- `INCLUDE`: extra names to treat as valuable even though they don't
+  contain `_ore` or `ancient_debris` at all — add one whenever `thorough`
+  is skipping over something you want chased.
+- `EXCLUDE`: names to *never* treat as valuable, checked before
+  everything else — wins over both `INCLUDE` and a genuine `_ore` match.
+  Add one whenever `thorough` is chasing something that isn't actually
+  worth mining (a purely decorative block that happens to have `_ore` in
+  its name, say).
+
+Both lists use plain substring matching against the block's full
+registry name (e.g. `"modid:block_name"`) — not an exact match, and not
+Lua pattern syntax, so a short, distinctive fragment is enough and
+characters like `.` or `-` are matched literally. Add a name and
+redeploy for it to take effect.

@@ -23,6 +23,7 @@ lib/chestfinder.lua
 lib/inventory.lua
 lib/identity.lua
 lib/champions.lua
+lib/ores.lua
 
 # --- programs -------------------------------------------------------
 # strip.lua is WIP -- see the file's own header before deploying it.

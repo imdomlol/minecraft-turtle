@@ -93,6 +93,7 @@ local pathfind = dofile("/lib/pathfind.lua")
 local home = dofile("/lib/home.lua")
 local inventory = dofile("/lib/inventory.lua")
 local chestfinder = dofile("/lib/chestfinder.lua")
+local ores = dofile("/lib/ores.lua")
 
 local M = {}
 
@@ -137,6 +138,13 @@ local AXIS_OF = { north = "z", south = "z", east = "x", west = "x" }
 -- be unbounded (CraftOS's "too long without yielding" watchdog).
 local MAX_DIG_ATTEMPTS = 8
 
+local function matchesAny(name, list)
+  for _, fragment in ipairs(list) do
+    if name:find(fragment, 1, true) then return true end -- plain substring, no pattern syntax
+  end
+  return false
+end
+
 -- "Valuable" for `thorough`'s purposes: any ore block (vanilla and
 -- modded blocks alike overwhelmingly have "_ore" somewhere in the name,
 -- including deepslate variants and ones with a trailing variant/suffix
@@ -147,9 +155,16 @@ local MAX_DIG_ATTEMPTS = 8
 -- here -- a false positive (something with "_ore" in the name that
 -- isn't actually ore) is an acceptable rare cost for not missing real
 -- ones with a differently-placed suffix.
+--
+-- lib/ores.lua's EXCLUDE/INCLUDE lists let you override this without
+-- touching code: EXCLUDE wins over everything (a name matching both
+-- "_ore" and EXCLUDE is not valuable), INCLUDE only matters for names
+-- that don't otherwise match "_ore"/"ancient_debris" at all.
 local function isValuable(name)
   if not name then return false end
-  return name:find("_ore") ~= nil or name:find("ancient_debris") ~= nil
+  if matchesAny(name, ores.EXCLUDE) then return false end
+  if name:find("_ore") ~= nil or name:find("ancient_debris") ~= nil then return true end
+  return matchesAny(name, ores.INCLUDE)
 end
 
 -- The 6 axis-aligned neighbors of a cell. The 4 horizontal ones carry the
