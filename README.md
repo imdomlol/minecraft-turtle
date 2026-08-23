@@ -441,6 +441,35 @@ never waiting on an uncapped `mine_vertical` to finish on its own) and
 rebooting once the job actually reaches idle. See `lib/job.lua` below for
 why that's safe even if the stop doesn't finish cleanly.
 
+`worksite.lua` is the current mining site's bounds and known chest
+location (`turtlectl.py worksite <controller> [minX minZ maxX maxZ y
+chestX chestY chestZ capacity]`, no args to just view it). It splits the
+site into `capacity` non-overlapping rectangular cells, computed once at
+set time (not recomputed as the roster's size changes later, so an
+already-assigned turtle never has its boundaries shift out from under
+it), and hands each turtle the same cell back every time it asks
+(`M.assignCell()`) — `M.jobFor(cell)` turns one into ready-to-launch
+`mine_vertical` params, carefully rounding the cell's (generally
+fractional) float boundaries *inward* to the nearest integer coordinate
+so a job's footprint can never spill into the next cell over — this
+caught a real off-by-one during testing (rounding the origin the wrong
+way landed it one block into the neighboring cell).
+
+`scheduler.lua` is the autopilot, gated by `mode.lua`'s
+`M.shouldAutopilot()`. Every ~5s: any turtle reporting a real (non-
+"unlimited") fuel level under 20 is treated as stranded — an idle,
+non-stranded turtle carrying the most spare fuel *items* (`lib/fuel.lua`'s
+`M.spareFuelItems()`, distinct from fuel level — only unspent inventory
+items can actually be handed to another turtle) is sent to stand next to
+it and drop half its spare fuel, then the stranded turtle refuels and is
+reassigned its own (same, sticky) worksite cell; every other idle turtle
+just gets assigned a cell directly. Rescues are resolved in their own
+pass strictly before work assignment, and every turtle a rescue touches
+is excluded from both the work-assignment pass and any other rescue that
+same tick — `pairs()` iteration order isn't guaranteed, and without this
+a turtle could otherwise be handed two conflicting orders (its own work,
+and a rescue trip) in the same pass.
+
 ## lib/fuel.lua
 
 Keeps a turtle from silently failing to move for lack of fuel. CC:Tweaked

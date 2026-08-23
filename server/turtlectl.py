@@ -23,6 +23,8 @@ Usage:
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
   turtlectl.py mode <controller> [idle|passive|aggressive]  -- get or set the autopilot mode
   turtlectl.py version <controller> [N] [--bump]  -- get or set the controller's code version
+  turtlectl.py worksite <controller> [minX minZ maxX maxZ y chestX chestY chestZ capacity]
+                         -- get (no args) or set the current mining worksite
 
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
@@ -309,6 +311,20 @@ def build_shortcut(cmd, ns):
             return f"set version to {ns.n}", f'return dofile("/dom-main/controller/version.lua").set({ns.n})'
         return "current version", 'return dofile("/dom-main/controller/version.lua").get()'
 
+    if cmd == "worksite":
+        fields = [ns.minX, ns.minZ, ns.maxX, ns.maxZ, ns.y, ns.chestX, ns.chestY, ns.chestZ, ns.capacity]
+        if all(f is None for f in fields):
+            return "current worksite", 'return dofile("/dom-main/controller/worksite.lua").get()'
+        if any(f is None for f in fields):
+            print("error: worksite needs all of minX minZ maxX maxZ y chestX chestY chestZ capacity, "
+                  "or none of them (to just view it)", file=sys.stderr)
+            sys.exit(1)
+        args_str = ", ".join(str(f) for f in fields)
+        command = f'return dofile("/dom-main/controller/worksite.lua").set({args_str})'
+        description = (f"set worksite ({ns.minX},{ns.minZ})-({ns.maxX},{ns.maxZ}) y={ns.y} "
+                        f"chest=({ns.chestX},{ns.chestY},{ns.chestZ}) capacity={ns.capacity}")
+        return description, command
+
     raise ValueError(f"unknown shortcut: {cmd}")
 
 
@@ -316,7 +332,7 @@ TURTLE_SHORTCUTS = {
     "goto", "mine", "stop", "jobstatus", "pos", "setpos", "turnleft", "turnright",
     "inv", "home", "markhome", "findchest", "dump",
 }
-CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode", "version"}
+CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode", "version", "worksite"}
 # whoami is the one shortcut where <turtle> is optional -- see its
 # build_shortcut() branch and the unified dispatch below, which proxies
 # to a turtle whenever one was given rather than checking set membership.
@@ -435,6 +451,10 @@ def build_console_parser():
     verp.add_argument("n", nargs="?", type=int)
     verp.add_argument("--bump", action="store_true")
 
+    wsp = sub.add_parser("worksite", add_help=False)
+    for name in ("minX", "minZ", "maxX", "maxZ", "y", "chestX", "chestY", "chestZ", "capacity"):
+        wsp.add_argument(name, nargs="?", type=int)
+
     return p
 
 
@@ -463,6 +483,8 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   whoami [turtle]                              basic info about the controller, or that turtle if named
   mode [idle|passive|aggressive]               get or set the autopilot mode (omit to just report it)
   version [N] [--bump]                         get or set the controller's manually-tracked code version
+  worksite [minX minZ maxX maxZ y chestX chestY chestZ capacity]
+                                                get (no args) or set the current mining worksite
   help                                         show this list
 
 mode governs the (not yet built) autopilot scheduler, not manual commands
@@ -587,6 +609,20 @@ def main():
     verp.add_argument("controller")
     verp.add_argument("n", nargs="?", type=int, help="Omit to just report the current version.")
     verp.add_argument("--bump", action="store_true", help="Increment the current version by 1.")
+
+    wsp = sub.add_parser("worksite", parents=[waitp],
+                          help="Get or set the current mining worksite (bounds + chest location).")
+    wsp.add_argument("controller")
+    wsp.add_argument("minX", nargs="?", type=int, help="Omit all 9 of minX..capacity to just view the current worksite.")
+    wsp.add_argument("minZ", nargs="?", type=int)
+    wsp.add_argument("maxX", nargs="?", type=int)
+    wsp.add_argument("maxZ", nargs="?", type=int)
+    wsp.add_argument("y", nargs="?", type=int, help="Height to start mining passes from.")
+    wsp.add_argument("chestX", nargs="?", type=int, help="Where a full turtle should go to unload.")
+    wsp.add_argument("chestY", nargs="?", type=int)
+    wsp.add_argument("chestZ", nargs="?", type=int)
+    wsp.add_argument("capacity", nargs="?", type=int,
+                      help="How many non-overlapping cells to divide the site into (one per turtle).")
 
     gp = sub.add_parser("goto", parents=[waitp], help="Move to (x, y, z) as a background job.")
     gp.add_argument("controller")

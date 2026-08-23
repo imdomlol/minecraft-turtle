@@ -21,11 +21,25 @@ function M.run()
     return
   end
 
-  local modem = peripheral.find("modem", function(_, m) return m.isWireless() end)
-  if not modem then
-    print("fleet_listener: no wireless/ender modem attached to this computer.")
-    return
+  -- Retries rather than giving up outright: right after a server
+  -- restart, peripheral attachment can briefly lag chunk loading, and a
+  -- one-shot check-and-quit here would strand every turtle in this
+  -- dimension unable to ever find this controller again until it's
+  -- manually rebooted -- exactly the kind of permanent-disconnect risk
+  -- worth guarding against.
+  local modem
+  local warnedNoModem = false
+  while not modem do
+    modem = peripheral.find("modem", function(_, m) return m.isWireless() end)
+    if not modem then
+      if not warnedNoModem then
+        print("fleet_listener: no wireless/ender modem attached to this computer, retrying...")
+        warnedNoModem = true
+      end
+      sleep(10)
+    end
   end
+  if warnedNoModem then print("fleet_listener: modem found.") end
   -- peripheral.find() hands back the wrapped peripheral, not the side it
   -- lives on -- peripheral.getName() recovers that so rednet.open() gets
   -- a side name instead of a peripheral table.

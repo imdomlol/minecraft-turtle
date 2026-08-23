@@ -61,6 +61,29 @@ function M.hasFuel(minLevel)
   return level == "unlimited" or level >= minLevel
 end
 
+-- How many fuel-type items this turtle is carrying, distinct from its
+-- current fuel LEVEL (tank contents already burned into fuel level
+-- can't be un-burned and handed to another turtle -- only unspent items
+-- still sitting in inventory can). turtle.refuel(0) is CC:Tweaked's
+-- documented dry-run form: checks whether the selected slot's item is
+-- valid fuel without actually consuming it. Used by dom-main/
+-- controller/scheduler.lua (via a heartbeat field) to pick a fuel-rescue
+-- donor for a stranded turtle -- a turtle with a high fuel *level* but
+-- no spare *items* has nothing left to physically hand over.
+function M.spareFuelItems()
+  local originalSlot = turtle.getSelectedSlot()
+  local total = 0
+  for slot = 1, 16 do
+    local count = turtle.getItemCount(slot)
+    if count > 0 then
+      turtle.select(slot)
+      if turtle.refuel(0) then total = total + count end
+    end
+  end
+  turtle.select(originalSlot)
+  return total
+end
+
 -- turtle.refuel() only ever burns whatever's in the CURRENTLY SELECTED
 -- slot -- it doesn't scan the rest of the inventory on its own. That
 -- bit twice over here: the turtle's own pre-existing fuel might not

@@ -56,6 +56,7 @@ local function upsert(senderId, message)
     computerId = senderId,
     label = message.label,
     fuel = message.fuel,
+    fuelItems = message.fuelItems,
     position = message.position,
     job = message.job,
     lastSeen = now,
@@ -97,6 +98,7 @@ function M.report()
     out[name] = {
       label = entry.label,
       fuel = entry.fuel,
+      fuelItems = entry.fuelItems,
       position = entry.position,
       job = entry.job,
       secondsAgo = math.floor((now - entry.lastSeen) / 1000),

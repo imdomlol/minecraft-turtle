@@ -115,6 +115,7 @@ local function heartbeatLoop(ident, controllerId)
   local nav = dofile("/lib/nav.lua")
   local job = dofile("/lib/job.lua")
   local updater = dofile("/lib/updater.lua")
+  local fuel = dofile("/lib/fuel.lua")
 
   while true do
     rednet.send(controllerId, {
@@ -122,6 +123,11 @@ local function heartbeatLoop(ident, controllerId)
       id = ident.id,
       label = os.getComputerLabel(),
       fuel = turtle.getFuelLevel(),
+      -- Distinct from `fuel` (tank level): how many unspent fuel items
+      -- are sitting in inventory, right now the only thing
+      -- dom-main/controller/scheduler.lua's fuel-rescue can actually
+      -- hand to a stranded turtle.
+      fuelItems = fuel.spareFuelItems(),
       position = nav.getPosition(),
       job = job.status(),
     }, PROTOCOL)
@@ -156,10 +162,23 @@ function M.run()
     print("fleet: rednet api disabled, cannot reach a controller.")
     return
   end
-  if not peripheral.isPresent(MODEM_SIDE) then
-    print("fleet: no modem equipped in the " .. MODEM_SIDE .. " slot.")
-    return
+
+  -- Retries rather than giving up outright: right after a server
+  -- restart, peripheral attachment can briefly lag chunk loading, and a
+  -- one-shot check-and-quit here would strand this turtle unreachable
+  -- for the rest of the boot session (only a manual reboot would ever
+  -- retry) -- exactly the kind of permanent-disconnect risk worth
+  -- guarding against.
+  local warnedNoModem = false
+  while not peripheral.isPresent(MODEM_SIDE) do
+    if not warnedNoModem then
+      print("fleet: no modem equipped in the " .. MODEM_SIDE .. " slot, retrying...")
+      warnedNoModem = true
+    end
+    sleep(DISCOVERY_BACKOFF)
   end
+  if warnedNoModem then print("fleet: modem found.") end
+
   if not rednet.isOpen(MODEM_SIDE) then
     rednet.open(MODEM_SIDE)
   end

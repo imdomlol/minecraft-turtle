@@ -421,7 +421,14 @@ end
 -- returnToColumnStart/mineVein's own return-to-origin above -- the trip
 -- back is a recovery step and must finish once started, not be cut short
 -- by a stop request that arrived while it was full.
-local function unloadIfFull(tidy)
+-- chestPos (optional, { x, y, z } -- e.g. from a fleet controller's
+-- dom-main/controller/worksite.lua) searches around that known chest
+-- instead of lib/home.lua's remembered position, for a turtle whose
+-- actual mining site is nowhere near home. "Around", not "at": still a
+-- chestfinder.lua radius search (see its own default maxRadius), not an
+-- exact-position assumption, since a manually-given coordinate is
+-- usually approximate.
+local function unloadIfFull(tidy, chestPos)
   if not inventory.isFull() then return true end
 
   if not tidy then
@@ -430,7 +437,12 @@ local function unloadIfFull(tidy)
 
   local origin = nav.getPosition()
   print("vertical: inventory full, looking for a chest to unload into")
-  local found, reason = chestfinder.find({})
+  local found, reason
+  if chestPos then
+    found, reason = chestfinder.find({ x = chestPos.x, y = chestPos.y, z = chestPos.z })
+  else
+    found, reason = chestfinder.find({})
+  end
   if not found then
     return false, "inventory full, no chest found: " .. tostring(reason)
   end
@@ -465,13 +477,13 @@ end
 -- valuable block either of them finds gets chased if thorough is on.
 -- observant on its own is just "also look left/right too"; it doesn't
 -- gate whether thorough is allowed to act.
-local function digForward(observant, thorough, tidy, unreachableNames, shouldStop)
+local function digForward(observant, thorough, tidy, chestPos, unreachableNames, shouldStop)
   for _ = 1, MAX_DIG_ATTEMPTS do
     local found, data = turtle.inspect()
     if not found or isLiquidAhead(found, data) then
       local ok, err = nav.forward()
       if ok then
-        local unloadOk, unloadErr = unloadIfFull(tidy)
+        local unloadOk, unloadErr = unloadIfFull(tidy, chestPos)
         if not unloadOk then
           return true, nil, unloadErr
         end
@@ -537,9 +549,9 @@ end
 
 -- The turtle is 1 block wide -- unlike strip.lua's 2-tall shaft, a leg
 -- only needs to clear the single cell it's moving into.
-local function tunnelForward(n, observant, thorough, tidy, unreachableNames, shouldStop)
+local function tunnelForward(n, observant, thorough, tidy, chestPos, unreachableNames, shouldStop)
   for i = 1, n do
-    local ok, _, fatal = digForward(observant, thorough, tidy, unreachableNames, shouldStop)
+    local ok, _, fatal = digForward(observant, thorough, tidy, chestPos, unreachableNames, shouldStop)
     if fatal then return i, fatal end
     if not ok then return i - 1 end
   end
@@ -582,7 +594,7 @@ end
 -- unloadIfFull() failed -- see digForward/tunnelForward above; the whole
 -- job needs to stop, not just this pass) -- and a third value carrying
 -- the fatal error string, only present when reason == "fatal".
-local function digColumn(length, stepDown, height, observant, thorough, tidy, unreachableNames, shouldStop, startDepth, onProgress)
+local function digColumn(length, stepDown, height, observant, thorough, tidy, chestPos, unreachableNames, shouldStop, startDepth, onProgress)
   local legCount = 0
   local depth = startDepth or 0
 
@@ -602,7 +614,7 @@ local function digColumn(length, stepDown, height, observant, thorough, tidy, un
     depth = depth + dSteps
     if dSteps < step then return legCount, "bedrock" end
 
-    local fSteps, fatal = tunnelForward(length, observant, thorough, tidy, unreachableNames, shouldStop)
+    local fSteps, fatal = tunnelForward(length, observant, thorough, tidy, chestPos, unreachableNames, shouldStop)
     legCount = legCount + 1
     if fatal then return legCount, "fatal", fatal end
     if fSteps == 0 then return legCount, "blocked" end
@@ -661,7 +673,10 @@ end
 
 -- Job entry point (see lib/job.lua): params is { length, stepDown,
 -- height, minFuel, columnStep, columnDY, widthFacing, lengthFacing,
--- width, tidy, observant, thorough }, all optional (see DEFAULTS).
+-- width, tidy, observant, thorough, chestPos }, all optional (see
+-- DEFAULTS). chestPos ({ x, y, z }), if given, is where tidy's
+-- full-inventory unload searches around instead of lib/home.lua's
+-- remembered position -- see unloadIfFull()'s own comment.
 -- widthFacing/lengthFacing are compass names ("north", "east", "south",
 -- "west"); lengthFacing also accepts "all". height caps blocks descended
 -- per pass (nil = dig to bedrock). width caps how many width positions
@@ -695,6 +710,7 @@ function M.run(params, shouldStop)
   local widthFacing = params.widthFacing or DEFAULTS.widthFacing
   local widthCap    = params.width -- nil = unlimited
   local tidy        = optBool(params.tidy, DEFAULTS.tidy)
+  local chestPos    = params.chestPos -- optional { x, y, z } -- nil = lib/home.lua's remembered position, as before
   local observant   = optBool(params.observant, DEFAULTS.observant)
   local thorough    = optBool(params.thorough, DEFAULTS.thorough)
 
@@ -775,7 +791,7 @@ function M.run(params, shouldStop)
         end
       end
 
-      local unloadOk, unloadErr = unloadIfFull(tidy)
+      local unloadOk, unloadErr = unloadIfFull(tidy, chestPos)
       if not unloadOk then
         print("vertical: stopping -- " .. tostring(unloadErr))
         return false, unloadErr
@@ -796,7 +812,7 @@ function M.run(params, shouldStop)
       print(("vertical: width %d, pass facing %s starting at (%d, %d, %d)")
         :format(widthIndex, dir, columnStart.x, columnStart.y, columnStart.z))
 
-      local legCount, reason, fatal = digColumn(length, stepDown, height, observant, thorough, tidy, unreachableNames, shouldStop,
+      local legCount, reason, fatal = digColumn(length, stepDown, height, observant, thorough, tidy, chestPos, unreachableNames, shouldStop,
         passStartDepth,
         function(depth)
           job.checkpoint({ widthIndex = widthIndex, dirIndex = dirIndex, columnStart = columnStart, dySign = dySign, depth = depth })

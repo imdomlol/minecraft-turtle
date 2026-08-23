@@ -26,6 +26,8 @@ dom-main/controller/worldstore.lua
 dom-main/controller/block_sync.lua
 dom-main/controller/mode.lua
 dom-main/controller/version.lua
+dom-main/controller/worksite.lua
+dom-main/controller/scheduler.lua
 
 # --- shared libraries ---------------------------------------------------
 lib/exec.lua
