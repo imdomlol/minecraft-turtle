@@ -17,9 +17,22 @@
   starts M.run()) and a remote command's dofile() (which calls
   M.request()) must resolve to the exact same instance, or requests would
   vanish into a copy nothing is watching.
+
+  M.checkpoint(data) lets a running job persist incremental progress to
+  /state/job.state, so dom-main/turtle_main.lua can auto-resume it after
+  an unplanned interruption (crash, chunk unload, power loss) instead of
+  just coming back up idle. M.run()'s loop clears that file right after
+  every job function returns, for *any* reason -- natural completion, an
+  operator's stop, a version-triggered stop (lib/updater.lua), or a
+  crash pcall caught. That one line is what makes "only resume genuinely
+  unplanned interruptions" fall out for free: the only way a checkpoint
+  survives to the next boot is the whole computer stopping before that
+  line ever gets to run.
 ------------------------------------------------------------------------]]
 
 if _G.__JOB_MODULE then return _G.__JOB_MODULE end
+
+local CHECKPOINT_PATH = "/state/job.state"
 
 local M = {}
 
@@ -47,6 +60,42 @@ end
 
 function M.stop()
   M.request("idle")
+end
+
+-- True if `name` is a registered job (or "idle", always valid) -- lets
+-- boot-time resume logic check before calling M.request(), which
+-- otherwise error()s on an unrecognized name (e.g. one an OTA update
+-- removed or renamed since the checkpoint was written).
+function M.hasJob(name)
+  return name == "idle" or jobs[name] ~= nil
+end
+
+-- Persists incremental progress for the *currently running* job --
+-- meant to be called by a job function itself (see
+-- dom-main/mining/vertical.lua for the pattern), not from outside.
+-- `data` is whatever shape that job wants back on resume.
+function M.checkpoint(data)
+  if not fs.exists("/state") then fs.makeDir("/state") end
+  local f = fs.open(CHECKPOINT_PATH, "w")
+  f.write(textutils.serializeJSON({ name = current.name, params = current.params, checkpoint = data }))
+  f.close()
+end
+
+-- Returns { name, params, checkpoint } from the last checkpoint written
+-- before an unplanned interruption, or nil if there isn't one (the
+-- normal case -- see M.run()'s M.clearCheckpoint() below).
+function M.loadCheckpoint()
+  if not fs.exists(CHECKPOINT_PATH) then return nil end
+  local f = fs.open(CHECKPOINT_PATH, "r")
+  local text = f.readAll()
+  f.close()
+  local ok, decoded = pcall(textutils.unserializeJSON, text)
+  if ok and type(decoded) == "table" then return decoded end
+  return nil
+end
+
+function M.clearCheckpoint()
+  if fs.exists(CHECKPOINT_PATH) then fs.delete(CHECKPOINT_PATH) end
 end
 
 -- What's running now, and what's queued to replace it (if anything) --
@@ -101,6 +150,7 @@ function M.run()
       if not ok then
         print("job: " .. current.name .. " crashed -- " .. tostring(err))
       end
+      M.clearCheckpoint()
       if not pending then
         current = { name = "idle", params = {} }
       end

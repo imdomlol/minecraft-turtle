@@ -67,6 +67,10 @@ local function upsert(senderId, message)
     -- than needing to wait out some arbitrary initial delay.
     lastBlockPull = existing and existing.lastBlockPull or now,
   }
+
+  -- Piggybacked on every heartbeat rather than a separate round trip --
+  -- see lib/updater.lua (turtle-side) for what it does with this.
+  rednet.send(senderId, { type = "version", value = dofile("/dom-main/controller/version.lua").get() }, PROTOCOL)
 end
 
 -- Handles one incoming rednet message already known to be on our

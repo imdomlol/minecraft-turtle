@@ -27,6 +27,11 @@
   call anywhere in the codebase feeds the controller's world map; a
   "pull_blocks" message here just drains and forwards whatever's
   accumulated, on request.
+
+  Every heartbeat reply piggybacks the controller's current version
+  number (see dom-main/controller/roster.lua's upsert()) through to
+  lib/updater.lua, and checks right after whether it's now safe to
+  reboot for a pending update -- see that module for the actual policy.
 ------------------------------------------------------------------------]]
 
 local exec = dofile("/lib/exec.lua")
@@ -92,6 +97,8 @@ local function listenLoop(ident, controllerId)
         print("fleet: controller renamed us to " .. message.name .. " (collision)")
         dofile("/lib/identity.lua").set(message.name)
         ident.id = message.name
+      elseif message.type == "version" and message.value then
+        dofile("/lib/updater.lua").noteControllerVersion(message.value)
       end
     end
   end
@@ -107,6 +114,7 @@ end
 local function heartbeatLoop(ident, controllerId)
   local nav = dofile("/lib/nav.lua")
   local job = dofile("/lib/job.lua")
+  local updater = dofile("/lib/updater.lua")
 
   while true do
     rednet.send(controllerId, {
@@ -117,6 +125,9 @@ local function heartbeatLoop(ident, controllerId)
       position = nav.getPosition(),
       job = job.status(),
     }, PROTOCOL)
+    -- Reuses this same ~3s cadence rather than adding a whole new loop
+    -- just to poll "is it safe to reboot yet" -- see lib/updater.lua.
+    updater.checkAndReboot()
     sleep(HEARTBEAT_INTERVAL)
   end
 end

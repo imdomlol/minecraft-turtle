@@ -25,10 +25,12 @@ dom-main/controller/roster.lua
 dom-main/controller/worldstore.lua
 dom-main/controller/block_sync.lua
 dom-main/controller/mode.lua
+dom-main/controller/version.lua
 
 # --- shared libraries ---------------------------------------------------
 lib/exec.lua
 lib/worldmap.lua
+lib/updater.lua
 lib/fuel.lua
 lib/nav.lua
 lib/pathfind.lua

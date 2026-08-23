@@ -110,6 +110,7 @@ local inventory = dofile("/lib/inventory.lua")
 local chestfinder = dofile("/lib/chestfinder.lua")
 local ores = dofile("/lib/ores.lua")
 local fuel = dofile("/lib/fuel.lua")
+local job = dofile("/lib/job.lua")
 
 local M = {}
 
@@ -564,18 +565,26 @@ end
 -- blocks it descends per leg step. `height` (optional) caps how many
 -- blocks this pass descends in total before stopping on its own, even
 -- if bedrock is still further down -- nil means no cap (dig to bedrock,
--- the old unconditional behavior). Returns legCount (how many forward
--- legs were attempted), reason: "bedrock" (can't dig down any further --
--- the normal unbounded end of a pass), "height limit" (hit the `height`
--- cap exactly, on a clean leg boundary), "blocked" (a leg was obstructed
--- immediately -- a side wall, not the bottom), "interrupted"
--- (shouldStop() cut it short), or "fatal" (a mid-leg unloadIfFull()
--- failed -- see digForward/tunnelForward above; the whole job needs to
--- stop, not just this pass) -- and a third value carrying the fatal
--- error string, only present when reason == "fatal".
-local function digColumn(length, stepDown, height, observant, thorough, tidy, unreachableNames, shouldStop)
+-- the old unconditional behavior). `startDepth` (default 0) resumes a
+-- pass a checkpoint says was already partway descended -- see M.run()'s
+-- own resume handling; `onProgress(depth)`, if given, is called once per
+-- completed stepDown+leg+turn cycle, always at that same clean boundary
+-- (never mid-tunnelDown/mid-tunnelForward), so a resume only ever needs
+-- to re-drive a *whole* cycle from wherever the turtle's real position
+-- already is -- safe regardless of exactly how far into that cycle a
+-- crash happened, since digForward/digDown already no-op on a cell
+-- that's already dug (see their own comments). Returns legCount (how
+-- many forward legs were attempted), reason: "bedrock" (can't dig down
+-- any further -- the normal unbounded end of a pass), "height limit"
+-- (hit the `height` cap exactly, on a clean leg boundary), "blocked" (a
+-- leg was obstructed immediately -- a side wall, not the bottom),
+-- "interrupted" (shouldStop() cut it short), or "fatal" (a mid-leg
+-- unloadIfFull() failed -- see digForward/tunnelForward above; the whole
+-- job needs to stop, not just this pass) -- and a third value carrying
+-- the fatal error string, only present when reason == "fatal".
+local function digColumn(length, stepDown, height, observant, thorough, tidy, unreachableNames, shouldStop, startDepth, onProgress)
   local legCount = 0
-  local depth = 0
+  local depth = startDepth or 0
 
   while true do
     if shouldStop and shouldStop() then
@@ -599,6 +608,8 @@ local function digColumn(length, stepDown, height, observant, thorough, tidy, un
     if fSteps == 0 then return legCount, "blocked" end
 
     nav.turnRight(); nav.turnRight()
+
+    if onProgress then onProgress(depth) end
   end
 end
 
@@ -660,6 +671,21 @@ end
 -- remembered even across a mid-run reboot -- each subsequent position's
 -- own top is just tracked locally, since home.lua only remembers one
 -- position and every width position needs its own.
+--
+-- params.__resume (set by dom-main/turtle_main.lua's boot-time recovery,
+-- from a checkpoint dom-main/controller/roster.lua and lib/job.lua's own
+-- machinery preserved across an unplanned interruption -- crash, chunk
+-- unload, power loss) picks the loop back up at the exact width
+-- position/direction/depth it left off at, instead of starting over from
+-- widthIndex 1. Every full stepDown+leg+turn cycle checkpoints via
+-- job.checkpoint() (see digColumn's onProgress above) -- deliberately
+-- coarse (once per cycle, not mid-leg or mid-vein-chase): digForward/
+-- digDown already no-op on a cell that's already been dug, so re-driving
+-- a whole cycle from wherever the turtle's real (nav.lua-persisted)
+-- position actually is safely recovers any finer-grained partial
+-- progress for free, without needing to persist it explicitly. A vein
+-- chase in progress at the moment of a crash is simply not resumed --
+-- an acceptable, bounded cost (see this file's own top-of-file comment).
 function M.run(params, shouldStop)
   params = params or {}
   local length      = params.length or DEFAULTS.length
@@ -706,23 +732,39 @@ function M.run(params, shouldStop)
     lengthDirections = { lf }
   end
 
+  local resume = params.__resume
+
   if not home.get() then home.mark() end
 
-  local columnStart = nav.getPosition()
-  local dySign = 1
-  local widthIndex = 0
+  local columnStart = (resume and resume.columnStart) or nav.getPosition()
+  local dySign = (resume and resume.dySign) or 1
+  -- widthIndex starts one short of the resumed value, not the resumed
+  -- value itself, so the "widthIndex = widthIndex + 1" at the top of the
+  -- loop below (unchanged either way) lands on it correctly.
+  local widthIndex = resume and (resume.widthIndex - 1) or 0
+  local startDirIndex = (resume and resume.dirIndex) or 1
+  -- Only the very first resumed pass gets a nonzero starting depth --
+  -- cleared to nil right after being read, below, so every later pass in
+  -- this run (resumed or not) starts a fresh descent from 0 as normal.
+  local startDepth = resume and resume.depth or nil
   -- Block names thorough has learned it can't actually mine (undiggable
   -- regardless of tool tier), so it stops re-chasing the same ore type
   -- from scratch every time a later leg step or width position grazes
   -- the same deposit again -- see mineVein() above. Persists for this
-  -- whole run; starts fresh next time the job starts.
+  -- whole run; starts fresh next time the job starts (including on a
+  -- resume -- a bounded, acceptable cost, see this file's own top
+  -- comment).
   local unreachableNames = {}
 
   while not (shouldStop and shouldStop()) do
     widthIndex = widthIndex + 1
     local interrupted = false
 
-    for _, dir in ipairs(lengthDirections) do
+    for dirIndex = startDirIndex, #lengthDirections do
+      local dir = lengthDirections[dirIndex]
+      local passStartDepth = startDepth
+      startDepth = nil
+
       local fuelLevel = turtle.getFuelLevel()
       if fuelLevel ~= "unlimited" and fuelLevel < minFuel then
         fuel.ensureFuel(minFuel) -- tries inventory, then front/up/down/left/right -- see lib/fuel.lua
@@ -739,11 +781,26 @@ function M.run(params, shouldStop)
         return false, unloadErr
       end
 
-      nav.face(dir)
+      -- A resumed mid-pass (passStartDepth set) must NOT re-face `dir`
+      -- here: legs alternate direction via a 180 turn after every
+      -- completed cycle (see digColumn), so after an odd number of
+      -- completed legs the turtle is actually facing *back* toward
+      -- columnStart, not still facing `dir`. Forcing it back to `dir`
+      -- would silently corrupt that alternation and send the next leg
+      -- the wrong way. nav.lua's already-persisted heading is the
+      -- correct one to trust here; only a fresh pass (no resume depth)
+      -- needs to be pointed at `dir` at all.
+      if not passStartDepth then
+        nav.face(dir)
+      end
       print(("vertical: width %d, pass facing %s starting at (%d, %d, %d)")
         :format(widthIndex, dir, columnStart.x, columnStart.y, columnStart.z))
 
-      local legCount, reason, fatal = digColumn(length, stepDown, height, observant, thorough, tidy, unreachableNames, shouldStop)
+      local legCount, reason, fatal = digColumn(length, stepDown, height, observant, thorough, tidy, unreachableNames, shouldStop,
+        passStartDepth,
+        function(depth)
+          job.checkpoint({ widthIndex = widthIndex, dirIndex = dirIndex, columnStart = columnStart, dySign = dySign, depth = depth })
+        end)
       print(("vertical: width %d pass done -- %d legs (%s), climbing back to start")
         :format(widthIndex, legCount, reason))
 
@@ -763,6 +820,11 @@ function M.run(params, shouldStop)
         break
       end
     end
+
+    -- Only the width position this run started/resumed at can begin
+    -- partway through lengthDirections; every one after it always runs
+    -- the full set from the first direction.
+    startDirIndex = 1
 
     if interrupted then
       print("vertical: interrupted, stopped at width position " .. widthIndex .. "'s start")

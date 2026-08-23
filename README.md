@@ -429,6 +429,18 @@ reboot); whether an operator is connected right now is deliberately
 runtime-only state, since a reboot should always start with nobody
 connected.
 
+`version.lua` is the controller's manually-bumped "current code version"
+(`turtlectl.py version <controller> [N] [--bump]`) — deliberately not
+tied to git automatically, so pushing new code and telling the fleet to
+actually roll out are separate, deliberate steps. Piggybacked on every
+heartbeat reply (`roster.lua`'s `upsert()`), a turtle's `lib/updater.lua`
+adopts the first version it ever hears silently, then treats a later
+strictly-newer one as "reboot once safe" — calling the same graceful
+`job.stop()` an operator's `stop` already triggers (bounded latency,
+never waiting on an uncapped `mine_vertical` to finish on its own) and
+rebooting once the job actually reaches idle. See `lib/job.lua` below for
+why that's safe even if the stop doesn't finish cleanly.
+
 ## lib/fuel.lua
 
 Keeps a turtle from silently failing to move for lack of fuel. CC:Tweaked
@@ -700,6 +712,21 @@ is there). Like `lib/nav.lua`, this caches itself on `_G`, since
 `dom-main/turtle_main.lua`'s `dofile()` (running the loop) and a remote
 command's `dofile()` (requesting a switch) must resolve to the same
 instance or the request vanishes into a copy nothing is watching.
+
+A job can also opt into surviving an unplanned interruption (crash,
+chunk unload, power loss) via `M.checkpoint(data)`, persisted to
+`/state/job.state` alongside whatever job/params it belongs to.
+`M.run()`'s loop clears that file right after *every* job function
+return, for any reason — natural completion, an operator's `stop`, a
+version-triggered `stop` (`lib/updater.lua`), or a crashed `pcall` all
+go through that one line. The only way a checkpoint survives to the next
+boot is the whole computer stopping before that line ever runs — which
+is exactly what `dom-main/turtle_main.lua` checks for at startup, calling
+`M.request()` again with the saved checkpoint attached
+(`params.__resume`) if one's found. `dom-main/mining/vertical.lua` is
+the only job that currently uses this — see its own header comment for
+why a fairly coarse checkpoint granularity (once per stepDown+leg cycle,
+not mid-leg) is enough for a genuinely safe resume.
 
 A built-in `"goto"` job is always registered, no setup needed — it exists
 so an ad-hoc long trip doesn't have to block the console the way running

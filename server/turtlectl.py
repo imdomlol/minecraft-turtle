@@ -22,6 +22,7 @@ Usage:
   turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
   turtlectl.py mode <controller> [idle|passive|aggressive]  -- get or set the autopilot mode
+  turtlectl.py version <controller> [N] [--bump]  -- get or set the controller's code version
 
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
@@ -301,6 +302,13 @@ def build_shortcut(cmd, ns):
             return f"set mode to {ns.value}", command
         return "current mode", 'return dofile("/dom-main/controller/mode.lua").get()'
 
+    if cmd == "version":
+        if getattr(ns, "bump", False):
+            return "bump version", 'return dofile("/dom-main/controller/version.lua").bump()'
+        if getattr(ns, "n", None) is not None:
+            return f"set version to {ns.n}", f'return dofile("/dom-main/controller/version.lua").set({ns.n})'
+        return "current version", 'return dofile("/dom-main/controller/version.lua").get()'
+
     raise ValueError(f"unknown shortcut: {cmd}")
 
 
@@ -308,7 +316,7 @@ TURTLE_SHORTCUTS = {
     "goto", "mine", "stop", "jobstatus", "pos", "setpos", "turnleft", "turnright",
     "inv", "home", "markhome", "findchest", "dump",
 }
-CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode"}
+CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode", "version"}
 # whoami is the one shortcut where <turtle> is optional -- see its
 # build_shortcut() branch and the unified dispatch below, which proxies
 # to a turtle whenever one was given rather than checking set membership.
@@ -423,6 +431,10 @@ def build_console_parser():
     modp = sub.add_parser("mode", add_help=False)
     modp.add_argument("value", nargs="?", choices=["idle", "passive", "aggressive"])
 
+    verp = sub.add_parser("version", add_help=False)
+    verp.add_argument("n", nargs="?", type=int)
+    verp.add_argument("--bump", action="store_true")
+
     return p
 
 
@@ -450,6 +462,7 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   worldblock <x> <y> <z>                       block recorded at that coordinate, or None
   whoami [turtle]                              basic info about the controller, or that turtle if named
   mode [idle|passive|aggressive]               get or set the autopilot mode (omit to just report it)
+  version [N] [--bump]                         get or set the controller's manually-tracked code version
   help                                         show this list
 
 mode governs the (not yet built) autopilot scheduler, not manual commands
@@ -459,6 +472,14 @@ above -- those always work no matter what mode is set:
   passive     autopilot issues commands only while nobody's connected --
               the moment you connect (this console session counts), it
               defers to you until you disconnect
+
+version is manual, not tied to git -- bump it once you've pushed new code
+AND actually want the fleet to reboot and pick it up. Turtles check it on
+every heartbeat and reboot on their own once safe to (a mid-job turtle
+finishes its current leg/height-step first, same latency as `stop`) --
+never mid-job, and never losing progress even if interrupted, since
+mine_vertical checkpoints and auto-resumes across a reboot regardless of
+why it happened.
 
 --dig safe (bare --dig's default) routes around a chest or a ComputerCraft
 block (another turtle, computer, modem, etc) instead of digging it, since
@@ -560,6 +581,12 @@ def main():
     modp.add_argument("controller")
     modp.add_argument("value", nargs="?", choices=["idle", "passive", "aggressive"],
                        help="Omit to just report the current mode.")
+
+    verp = sub.add_parser("version", parents=[waitp],
+                           help="Get or set the controller's manually-tracked code version.")
+    verp.add_argument("controller")
+    verp.add_argument("n", nargs="?", type=int, help="Omit to just report the current version.")
+    verp.add_argument("--bump", action="store_true", help="Increment the current version by 1.")
 
     gp = sub.add_parser("goto", parents=[waitp], help="Move to (x, y, z) as a background job.")
     gp.add_argument("controller")
