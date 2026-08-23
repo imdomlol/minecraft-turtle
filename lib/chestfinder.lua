@@ -4,10 +4,15 @@
   turtle.inspect() of whatever's immediately touching it.
 
   M.find(): defaults to searching around lib/home.lua's recorded
-  position; pass x/y/z to search around somewhere else instead.
-  Non-destructive: never digs, and gives up (rather than plowing through
-  obstacles) if a step is blocked, since a locator digging through walls
-  to search would be a surprising thing for it to do on its own.
+  position; pass x/y/z to search around somewhere else instead. Getting
+  to that search center digs through obstacles ("safe" mode -- never a
+  chest or ComputerCraft block, see lib/pathfind.lua), since it's
+  typically a trip home from wherever a job just finished digging, not
+  part of the search itself. The search once there stays non-destructive
+  though: it gives up (rather than plowing through obstacles) if a step
+  is blocked, since a locator digging through walls near a base full of
+  player-built structures would be a surprising thing for it to do on
+  its own.
 
   M.dump(): finds a chest (like M.find(), but defaulting to searching
   around the turtle's own current position instead of home) and empties
@@ -99,7 +104,9 @@ end
 -- recorded position. opts.maxRadius (default 8) bounds the search;
 -- opts.matchName(name) overrides the default "name contains 'chest'"
 -- check, for modded storage blocks that don't follow that convention.
--- Returns the chest's position/name on success. On failure, returns nil,
+-- Reaching (x, y, z) in the first place digs through obstacles ("safe"
+-- mode, see above); the search itself, once there, never does. Returns
+-- the chest's position/name on success. On failure, returns nil,
 -- reason, and the turtle is returned to wherever the search started from
 -- (not left stranded mid-spiral); on success, it's left facing the chest
 -- (or in place, for one above/below), ready to interact with it.
@@ -116,7 +123,12 @@ function M.find(opts)
     end
   end
 
-  local reached, info = pathfind.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = false })
+  -- "safe" (dig/attack through obstacles, but never a chest or
+  -- ComputerCraft block -- see lib/pathfind.lua), not false: this trip is
+  -- typically home from wherever a mining job just dug to, through
+  -- terrain nothing has opened up yet, not a step of the search itself --
+  -- see the spiral search below, which stays deliberately non-destructive.
+  local reached, info = pathfind.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = "safe" })
   if not reached then
     return nil, "could not reach search center: " .. tostring(info.reason)
   end
