@@ -20,6 +20,7 @@ Usage:
   turtlectl.py console <controller>   -- live screen feed; type a command + enter to send it
   turtlectl.py roster <controller>    -- every turtle this controller currently knows about
   turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
+  turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
 
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
@@ -184,8 +185,11 @@ def facing_lua(facing):
 # below, whose subparsers mirror main()'s). Returns (description, lua).
 # TURTLE_SHORTCUTS entries build the command that runs *on the turtle*
 # (proxy_wrap() handles getting it there); CONTROLLER_SHORTCUTS entries
-# (currently just `roster`) build a command that runs on the controller
-# itself and are queued unwrapped.
+# build a command that runs on the controller itself and are queued
+# unwrapped. `whoami` is the one OPTIONAL_TURTLE_SHORTCUTS entry -- it
+# builds one or the other Lua string itself, depending on whether ns has
+# a turtle name, since "basic info about this device" means something
+# different on each side (see its own branch below).
 def build_shortcut(cmd, ns):
     if cmd == "goto":
         command = (
@@ -262,6 +266,26 @@ def build_shortcut(cmd, ns):
         params = "{ " + ", ".join(fields) + " }"
         return f"dump inventory {params}", f'return dofile("/lib/chestfinder.lua").dump({params})'
 
+    if cmd == "whoami":
+        if getattr(ns, "turtle", None):
+            command = (
+                'return { role = "turtle", '
+                'id = dofile("/lib/identity.lua").get(nil), '
+                'computerId = os.getComputerID(), label = os.getComputerLabel(), '
+                'fuel = turtle.getFuelLevel(), fuelLimit = turtle.getFuelLimit(), '
+                'position = dofile("/lib/nav.lua").getPosition(), '
+                'job = dofile("/lib/job.lua").status(), uptime = os.clock() }'
+            )
+        else:
+            command = (
+                'local n = 0 for _ in pairs(dofile("/dom-main/controller/roster.lua").all()) do n = n + 1 end; '
+                'return { role = "controller", '
+                'id = dofile("/lib/identity.lua").get(nil), '
+                'computerId = os.getComputerID(), label = os.getComputerLabel(), '
+                'turtleCount = n, uptime = os.clock() }'
+            )
+        return "whoami", command
+
     if cmd == "roster":
         return "fleet roster", 'return dofile("/dom-main/controller/roster.lua").report()'
 
@@ -277,7 +301,11 @@ TURTLE_SHORTCUTS = {
     "inv", "home", "markhome", "findchest", "dump",
 }
 CONTROLLER_SHORTCUTS = {"roster", "worldblock"}
-SHORTCUT_NAMES = TURTLE_SHORTCUTS | CONTROLLER_SHORTCUTS
+# whoami is the one shortcut where <turtle> is optional -- see its
+# build_shortcut() branch and the unified dispatch below, which proxies
+# to a turtle whenever one was given rather than checking set membership.
+OPTIONAL_TURTLE_SHORTCUTS = {"whoami"}
+SHORTCUT_NAMES = TURTLE_SHORTCUTS | CONTROLLER_SHORTCUTS | OPTIONAL_TURTLE_SHORTCUTS
 
 
 class ConsoleArgError(Exception):
@@ -381,6 +409,9 @@ def build_console_parser():
     wbp.add_argument("y", type=int)
     wbp.add_argument("z", type=int)
 
+    wap = sub.add_parser("whoami", add_help=False)
+    wap.add_argument("turtle", nargs="?")
+
     return p
 
 
@@ -406,6 +437,7 @@ this controller live; turtle-targeting ones still need a <turtle> name):
                                                 (see below for how --x/--y/--z and --radius interact)
   roster                                       every turtle this controller currently knows about
   worldblock <x> <y> <z>                       block recorded at that coordinate, or None
+  whoami [turtle]                              basic info about the controller, or that turtle if named
   help                                         show this list
 
 --dig safe (bare --dig's default) routes around a chest or a ComputerCraft
@@ -497,6 +529,11 @@ def main():
     wbp.add_argument("x", type=int)
     wbp.add_argument("y", type=int)
     wbp.add_argument("z", type=int)
+
+    wap = sub.add_parser("whoami", parents=[waitp],
+                          help="Basic info about a device -- the controller if <turtle> is omitted, that turtle if given.")
+    wap.add_argument("controller")
+    wap.add_argument("turtle", nargs="?", help="Omit to ask the controller about itself.")
 
     gp = sub.add_parser("goto", parents=[waitp], help="Move to (x, y, z) as a background job.")
     gp.add_argument("controller")
@@ -712,9 +749,10 @@ def main():
                         print(f"[{e}]", file=sys.stderr)
                         continue
                     description, inner = build_shortcut(ns.cmd, ns)
-                    if ns.cmd in TURTLE_SHORTCUTS:
-                        command = proxy_wrap(ns.turtle, inner)
-                        description = f"{description} (turtle {ns.turtle})"
+                    turtle_name = getattr(ns, "turtle", None)
+                    if turtle_name:
+                        command = proxy_wrap(turtle_name, inner)
+                        description = f"{description} (turtle {turtle_name})"
                     else:
                         command = inner
                 else:
@@ -741,13 +779,14 @@ def main():
         finally:
             stop.set()
 
-    elif args.cmd in TURTLE_SHORTCUTS:
+    elif args.cmd in SHORTCUT_NAMES:
         description, inner = build_shortcut(args.cmd, args)
-        command = proxy_wrap(args.turtle, inner)
-        queue(url, args, f"{description} (turtle {args.turtle})", command)
-
-    elif args.cmd in CONTROLLER_SHORTCUTS:
-        description, command = build_shortcut(args.cmd, args)
+        turtle_name = getattr(args, "turtle", None)
+        if turtle_name:
+            command = proxy_wrap(turtle_name, inner)
+            description = f"{description} (turtle {turtle_name})"
+        else:
+            command = inner
         queue(url, args, description, command)
 
 
