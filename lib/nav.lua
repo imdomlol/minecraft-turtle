@@ -144,6 +144,18 @@ function M.isChest(name)
   return name:lower():find("chest", 1, true) ~= nil
 end
 
+-- Is a block name a ComputerCraft block -- another turtle, computer,
+-- modem, monitor, disk drive, etc. Namespace prefix rather than a
+-- substring like isChest(), since these are always CC:Tweaked's own
+-- registry ID (mod id stayed "computercraft" even after the CC:Tweaked
+-- rename) and never a modded reskin -- unlike a chest, there's no
+-- legitimate reason to ever dig through one, so lib/pathfind.lua and
+-- dom-main/mining/vertical.lua route around it exactly like a chest.
+function M.isComputerCraftBlock(name)
+  if not name then return false end
+  return name:lower():find("^computercraft:") ~= nil
+end
+
 -- Spins through all 4 compass headings -- exactly 4 turnRight()s, so it
 -- always ends up back at the heading it started with -- inspecting front
 -- at each one, plus up/down: the full 6-block "shell" around the turtle,

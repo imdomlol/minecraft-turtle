@@ -390,12 +390,22 @@ local function isLiquidAhead(found, data)
 end
 
 -- Mining always digs -- there's no allowDig switch to opt out of it, the
--- way lib/pathfind.lua's travel has -- so a chest is refused unconditionally
--- rather than offering an "all" mode to plow through it: nothing here
--- should ever be able to destroy a player's storage chest just because it
--- happened to be in the path of a mining pass.
-local function isChestAhead(found, data)
-  return found and nav.isChest(data.name)
+-- way lib/pathfind.lua's travel has -- so a chest or ComputerCraft block
+-- (another turtle, computer, modem, monitor, etc.) is refused
+-- unconditionally rather than offering an "all" mode to plow through it:
+-- nothing here should ever be able to destroy a player's storage chest,
+-- or another turtle/computer, just because it happened to be in the path
+-- of a mining pass.
+local function isProtectedAhead(found, data)
+  return found and (nav.isChest(data.name) or nav.isComputerCraftBlock(data.name))
+end
+
+-- Distinguishes the two protected cases for the "in the way" message
+-- below, so a stuck job's reason says what it actually ran into instead
+-- of a generic "chest" that isn't true half the time.
+local function protectedKind(data)
+  if nav.isComputerCraftBlock(data.name) then return "ComputerCraft block" end
+  return "chest"
 end
 
 -- If the inventory's full, finds a chest and empties into it, then
@@ -477,8 +487,8 @@ local function digForward(observant, thorough, tidy, unreachableNames, shouldSto
       end
       return ok, err
     end
-    if isChestAhead(found, data) then
-      return false, "chest in the way -- refusing to dig through it"
+    if isProtectedAhead(found, data) then
+      return false, protectedKind(data) .. " in the way -- refusing to dig through it"
     end
     if not turtle.dig() then turtle.attack() end
   end
@@ -504,8 +514,8 @@ local function digDown(observant, thorough, unreachableNames, shouldStop)
       end
       return ok, err
     end
-    if isChestAhead(found, data) then
-      return false, "chest in the way -- refusing to dig through it"
+    if isProtectedAhead(found, data) then
+      return false, protectedKind(data) .. " in the way -- refusing to dig through it"
     end
     if not turtle.digDown() then turtle.attackDown() end
   end
@@ -516,8 +526,8 @@ local function digUp()
   for _ = 1, MAX_DIG_ATTEMPTS do
     local found, data = turtle.inspectUp()
     if not found or isLiquidAhead(found, data) then return nav.up() end
-    if isChestAhead(found, data) then
-      return false, "chest in the way -- refusing to dig through it"
+    if isProtectedAhead(found, data) then
+      return false, protectedKind(data) .. " in the way -- refusing to dig through it"
     end
     if not turtle.digUp() then turtle.attackUp() end
   end
