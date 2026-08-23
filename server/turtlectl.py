@@ -19,12 +19,13 @@ Usage:
   turtlectl.py watch <controller>
   turtlectl.py console <controller>   -- live screen feed; type a command + enter to send it
   turtlectl.py roster <controller>    -- every turtle this controller currently knows about
+  turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
 
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
 jobs vs plain calls -- these build the right dofile(...) command for you,
-and (except `roster` above, which queries the controller itself) route
-it through the named controller to the named turtle:
+and (except `roster`/`worldblock` above, which query the controller
+itself) route it through the named controller to the named turtle:
   turtlectl.py goto <controller> <turtle> <x> <y> <z> [--tolerance N] [--dig [safe|all]]
   turtlectl.py mine <controller> <turtle> [--width-facing north|east|south|west]
                          [--length-facing north|east|south|west|all]
@@ -264,6 +265,10 @@ def build_shortcut(cmd, ns):
     if cmd == "roster":
         return "fleet roster", 'return dofile("/dom-main/controller/roster.lua").report()'
 
+    if cmd == "worldblock":
+        command = f'return dofile("/dom-main/controller/worldstore.lua").query({ns.x}, {ns.y}, {ns.z})'
+        return f"block at ({ns.x}, {ns.y}, {ns.z})", command
+
     raise ValueError(f"unknown shortcut: {cmd}")
 
 
@@ -271,7 +276,7 @@ TURTLE_SHORTCUTS = {
     "goto", "mine", "stop", "jobstatus", "pos", "setpos", "turnleft", "turnright",
     "inv", "home", "markhome", "findchest", "dump",
 }
-CONTROLLER_SHORTCUTS = {"roster"}
+CONTROLLER_SHORTCUTS = {"roster", "worldblock"}
 SHORTCUT_NAMES = TURTLE_SHORTCUTS | CONTROLLER_SHORTCUTS
 
 
@@ -371,6 +376,11 @@ def build_console_parser():
 
     sub.add_parser("roster", add_help=False)
 
+    wbp = sub.add_parser("worldblock", add_help=False)
+    wbp.add_argument("x", type=int)
+    wbp.add_argument("y", type=int)
+    wbp.add_argument("z", type=int)
+
     return p
 
 
@@ -395,6 +405,7 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   dump <turtle> [--x N --y N --z N] [--radius N]        find a chest and empty the inventory into it
                                                 (see below for how --x/--y/--z and --radius interact)
   roster                                       every turtle this controller currently knows about
+  worldblock <x> <y> <z>                       block recorded at that coordinate, or None
   help                                         show this list
 
 --dig safe (bare --dig's default) routes around a chest or a ComputerCraft
@@ -479,6 +490,13 @@ def main():
 
     rop = sub.add_parser("roster", parents=[waitp], help="Every turtle this controller currently knows about.")
     rop.add_argument("controller")
+
+    wbp = sub.add_parser("worldblock", parents=[waitp],
+                          help="Look up the block this controller has recorded at (x, y, z).")
+    wbp.add_argument("controller")
+    wbp.add_argument("x", type=int)
+    wbp.add_argument("y", type=int)
+    wbp.add_argument("z", type=int)
 
     gp = sub.add_parser("goto", parents=[waitp], help="Move to (x, y, z) as a background job.")
     gp.add_argument("controller")

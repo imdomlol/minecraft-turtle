@@ -51,13 +51,21 @@ local function upsert(senderId, message)
     rednet.send(senderId, { type = "rename", name = newName }, PROTOCOL)
     return
   end
+  local now = os.epoch("utc")
   roster[name] = {
     computerId = senderId,
     label = message.label,
     fuel = message.fuel,
     position = message.position,
     job = message.job,
-    lastSeen = os.epoch("utc"),
+    lastSeen = now,
+    -- Preserved across every heartbeat rather than reset -- this whole
+    -- table gets replaced wholesale on every upsert, so without this a
+    -- turtle's pull staleness would forget itself every ~3s. A turtle
+    -- seen for the first time defaults to "now", making it immediately
+    -- eligible for dom-main/controller/block_sync.lua's next pull rather
+    -- than needing to wait out some arbitrary initial delay.
+    lastBlockPull = existing and existing.lastBlockPull or now,
   }
 end
 
@@ -135,6 +143,62 @@ function M.proxy(name, command, timeoutSeconds)
       end
       -- Not our reply -- still worth recording (another turtle's
       -- heartbeat/log arriving while we wait) rather than dropping it.
+      M.handleMessage(senderId, message)
+    end
+  end
+end
+
+-- The turtle whose block observations have gone longest unpulled -- a
+-- proxy for "has accumulated the most unreported data" without needing
+-- turtles to report their own buffer size. dom-main/controller/
+-- block_sync.lua's whole scheduling policy is just "call this, then
+-- pull from whoever it names" -- naturally round-robins the entire
+-- roster over time since pulling resets a turtle's own lastBlockPull to
+-- the newest timestamp. Returns nil if the roster is empty.
+function M.leastRecentlyPulled()
+  local bestName, bestTime = nil, nil
+  for name, entry in pairs(roster) do
+    if bestTime == nil or entry.lastBlockPull < bestTime then
+      bestName, bestTime = name, entry.lastBlockPull
+    end
+  end
+  return bestName
+end
+
+function M.markBlockPull(name, timestamp)
+  local entry = roster[name]
+  if entry then entry.lastBlockPull = timestamp end
+end
+
+-- Requests up to maxEntries buffered block observations from turtle
+-- `name` and blocks (up to timeoutSeconds) for the reply. A dedicated
+-- message pair ("pull_blocks"/"blocks"), not M.proxy()'s exec/"result"
+-- RPC -- that path stringifies its return value for human console
+-- display (lib/exec.lua), which would mean serializing a block table to
+-- text just to re-parse it back on this end. Returns the entries table
+-- on success, or nil, reason on failure (unknown turtle or timeout).
+function M.pullBlocks(name, maxEntries, timeoutSeconds)
+  local entry = roster[name]
+  if not entry then return nil, "unknown turtle: " .. tostring(name) end
+
+  rednet.send(entry.computerId, { type = "pull_blocks", max_entries = maxEntries }, PROTOCOL)
+
+  local deadline = os.clock() + (timeoutSeconds or DEFAULT_TIMEOUT)
+  while true do
+    local remaining = deadline - os.clock()
+    if remaining <= 0 then
+      return nil, "timeout waiting for " .. name
+    end
+    local senderId, message = rednet.receive(PROTOCOL, remaining)
+    if senderId == nil then
+      return nil, "timeout waiting for " .. name
+    end
+    if type(message) == "table" then
+      if senderId == entry.computerId and message.type == "blocks" then
+        return message.entries
+      end
+      -- Not our reply -- still worth recording, same reasoning as
+      -- M.proxy()'s identical wait loop above.
       M.handleMessage(senderId, message)
     end
   end

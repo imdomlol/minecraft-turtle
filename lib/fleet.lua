@@ -22,6 +22,11 @@
 
   Like lib/remote.lua, delegates "run this command and capture its
   output" to lib/exec.lua, which is shared between both transports.
+
+  Also installs lib/worldmap.lua at startup, so every turtle.inspect*()
+  call anywhere in the codebase feeds the controller's world map; a
+  "pull_blocks" message here just drains and forwards whatever's
+  accumulated, on request.
 ------------------------------------------------------------------------]]
 
 local exec = dofile("/lib/exec.lua")
@@ -74,6 +79,15 @@ local function listenLoop(ident, controllerId)
         rednet.send(controllerId, {
           type = "result", cmd_id = message.cmd_id, ok = ok, output = output,
         }, PROTOCOL)
+      elseif message.type == "pull_blocks" then
+        -- A dedicated request/reply pair rather than routing through
+        -- exec/"result" -- that path stringifies its return value for
+        -- human console display (see lib/exec.lua), which would mean
+        -- serializing a block-observation table to text here just to
+        -- re-parse it back into a table on the controller. rednet can
+        -- carry the real table directly instead.
+        local entries = dofile("/lib/worldmap.lua").drain(message.max_entries)
+        rednet.send(controllerId, { type = "blocks", entries = entries }, PROTOCOL)
       elseif message.type == "rename" and message.name then
         print("fleet: controller renamed us to " .. message.name .. " (collision)")
         dofile("/lib/identity.lua").set(message.name)
@@ -138,6 +152,8 @@ function M.run()
   if not rednet.isOpen(MODEM_SIDE) then
     rednet.open(MODEM_SIDE)
   end
+
+  dofile("/lib/worldmap.lua").install()
 
   local ident = { id = dofile("/lib/identity.lua").get(nil) }
   print("fleet: identity is " .. ident.id)

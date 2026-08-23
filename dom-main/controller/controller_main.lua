@@ -7,7 +7,9 @@
   now the only thing in its dimension polling server/relay.py -- alongside
   dom-main/controller/fleet_listener.lua, which listens for the turtles
   in this dimension over rednet and lets an operator's relay-issued
-  commands reach them (see dom-main/controller/roster.lua's M.proxy()).
+  commands reach them (see dom-main/controller/roster.lua's M.proxy()),
+  and dom-main/controller/block_sync.lua, which pulls buffered block
+  observations from turtles into dom-main/controller/worldstore.lua.
 
   The autopilot scheduler (dom-main/controller/scheduler.lua) is a later
   addition -- not wired in yet.
@@ -15,5 +17,6 @@
 
 local remote = dofile("/lib/remote.lua")
 local fleetListener = dofile("/dom-main/controller/fleet_listener.lua")
+local blockSync = dofile("/dom-main/controller/block_sync.lua")
 
-parallel.waitForAny(remote.run, fleetListener.run)
+parallel.waitForAny(remote.run, fleetListener.run, blockSync.run)
