@@ -404,6 +404,31 @@ every coroutine parked in `rednet.receive()` with the same event rather
 than handing it to just one of them, so `fleet_listener.lua`'s own
 receive loop and a `proxy()` call's nested one can safely coexist.
 
+`worldstore.lua` is the controller's source of truth for "what block is
+at (x, y, z)" (`turtlectl.py worldblock`), chunked the way Minecraft
+itself is (16×16×16 regions, one file per chunk under `/state/world/`)
+and paletted (block names map to small integers in a shared table) so it
+scales to a whole fleet mining around the clock instead of one
+ever-growing flat file. It's fed by `block_sync.lua`, which every ~2s
+pulls buffered observations from whichever turtle has gone longest
+since its last pull (`roster.lua`'s `M.leastRecentlyPulled()`) — turtles
+buffer what they've seen (`lib/worldmap.lua`, which wraps
+`turtle.inspect*()` so this needs no changes anywhere else) and hand a
+batch over only when asked, rather than pushing on a timer.
+
+`mode.lua` is the `idle`/`passive`/`aggressive` switch for the (not yet
+built) autopilot scheduler — `turtlectl.py mode <controller>
+[idle|passive|aggressive]`, adjustable at any time regardless of what
+it's currently set to. `idle` never autopilots; `aggressive` always
+does; `passive` does only while nobody's remoted in — `console`
+sessions call `M.connect()` at start (and again every ~10s, as a
+heartbeat) and `M.disconnect()` on exit, so a crashed session times out
+of "connected" instead of wedging passive mode into idle forever. Only
+the mode itself is persisted (`/state/controller.state`, survives
+reboot); whether an operator is connected right now is deliberately
+runtime-only state, since a reboot should always start with nobody
+connected.
+
 ## lib/fuel.lua
 
 Keeps a turtle from silently failing to move for lack of fuel. CC:Tweaked

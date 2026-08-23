@@ -21,12 +21,14 @@ Usage:
   turtlectl.py roster <controller>    -- every turtle this controller currently knows about
   turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
+  turtlectl.py mode <controller> [idle|passive|aggressive]  -- get or set the autopilot mode
 
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
 jobs vs plain calls -- these build the right dofile(...) command for you,
-and (except `roster`/`worldblock` above, which query the controller
-itself) route it through the named controller to the named turtle:
+and (except `roster`/`worldblock`/`mode` above, which query or control
+the controller itself) route it through the named controller to the
+named turtle:
   turtlectl.py goto <controller> <turtle> <x> <y> <z> [--tolerance N] [--dig [safe|all]]
   turtlectl.py mine <controller> <turtle> [--width-facing north|east|south|west]
                          [--length-facing north|east|south|west|all]
@@ -293,6 +295,12 @@ def build_shortcut(cmd, ns):
         command = f'return dofile("/dom-main/controller/worldstore.lua").query({ns.x}, {ns.y}, {ns.z})'
         return f"block at ({ns.x}, {ns.y}, {ns.z})", command
 
+    if cmd == "mode":
+        if getattr(ns, "value", None):
+            command = f'return dofile("/dom-main/controller/mode.lua").set("{ns.value}")'
+            return f"set mode to {ns.value}", command
+        return "current mode", 'return dofile("/dom-main/controller/mode.lua").get()'
+
     raise ValueError(f"unknown shortcut: {cmd}")
 
 
@@ -300,7 +308,7 @@ TURTLE_SHORTCUTS = {
     "goto", "mine", "stop", "jobstatus", "pos", "setpos", "turnleft", "turnright",
     "inv", "home", "markhome", "findchest", "dump",
 }
-CONTROLLER_SHORTCUTS = {"roster", "worldblock"}
+CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode"}
 # whoami is the one shortcut where <turtle> is optional -- see its
 # build_shortcut() branch and the unified dispatch below, which proxies
 # to a turtle whenever one was given rather than checking set membership.
@@ -412,6 +420,9 @@ def build_console_parser():
     wap = sub.add_parser("whoami", add_help=False)
     wap.add_argument("turtle", nargs="?")
 
+    modp = sub.add_parser("mode", add_help=False)
+    modp.add_argument("value", nargs="?", choices=["idle", "passive", "aggressive"])
+
     return p
 
 
@@ -438,7 +449,16 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   roster                                       every turtle this controller currently knows about
   worldblock <x> <y> <z>                       block recorded at that coordinate, or None
   whoami [turtle]                              basic info about the controller, or that turtle if named
+  mode [idle|passive|aggressive]               get or set the autopilot mode (omit to just report it)
   help                                         show this list
+
+mode governs the (not yet built) autopilot scheduler, not manual commands
+above -- those always work no matter what mode is set:
+  idle        autopilot never issues commands
+  aggressive  autopilot always issues commands, connected or not
+  passive     autopilot issues commands only while nobody's connected --
+              the moment you connect (this console session counts), it
+              defers to you until you disconnect
 
 --dig safe (bare --dig's default) routes around a chest or a ComputerCraft
 block (another turtle, computer, modem, etc) instead of digging it, since
@@ -534,6 +554,12 @@ def main():
                           help="Basic info about a device -- the controller if <turtle> is omitted, that turtle if given.")
     wap.add_argument("controller")
     wap.add_argument("turtle", nargs="?", help="Omit to ask the controller about itself.")
+
+    modp = sub.add_parser("mode", parents=[waitp],
+                           help="Get or set the controller's autopilot mode (idle/passive/aggressive).")
+    modp.add_argument("controller")
+    modp.add_argument("value", nargs="?", choices=["idle", "passive", "aggressive"],
+                       help="Omit to just report the current mode.")
 
     gp = sub.add_parser("goto", parents=[waitp], help="Move to (x, y, z) as a background job.")
     gp.add_argument("controller")
@@ -691,9 +717,34 @@ def main():
     elif args.cmd == "console":
         stop = threading.Event()
         cursor = [0]
+        HEARTBEAT_INTERVAL = 10  # seconds between mode.lua connect() heartbeats
+
+        def send_bookkeeping(command):
+            """Fire-and-forget: a missed connect/disconnect heartbeat just
+            gets retried on the next tick (or never matters again, for a
+            disconnect), so failures here are silently swallowed rather
+            than interrupting the console session the way request()'s
+            sys.exit(1) would."""
+            try:
+                req = urllib.request.Request(
+                    f"{url}/cmd?id={args.controller}",
+                    data=json.dumps({"command": command}).encode("utf-8"),
+                    method="POST",
+                )
+                req.add_header("Authorization", f"Bearer {args.token}")
+                req.add_header("Content-Type", "application/json")
+                with urllib.request.urlopen(req, timeout=10):
+                    pass
+            except Exception:
+                pass
 
         def poll_loop():
             last_err = None
+            # Starts at "now", not 0 -- the explicit connect() just below
+            # (before this thread starts) already covers session start;
+            # starting at 0 would make this loop's first iteration send
+            # an immediate, redundant duplicate.
+            last_heartbeat = time.time()
             while not stop.is_set():
                 try:
                     req = urllib.request.Request(f"{url}/log?id={args.controller}&after={cursor[0]}")
@@ -712,7 +763,20 @@ def main():
                     if str(e) != last_err:
                         print(f"\n[console: poll error: {e}]", file=sys.stderr)
                         last_err = str(e)
+
+                # dom-main/controller/mode.lua's connect() call is
+                # idempotent, so this one call serves as both the initial
+                # "an operator is here" signal and the ongoing heartbeat
+                # that keeps passive mode deferring to them -- see its
+                # own header comment for why this isn't persisted state.
+                now = time.time()
+                if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                    send_bookkeeping('dofile("/dom-main/controller/mode.lua").connect()')
+                    last_heartbeat = now
+
                 stop.wait(1)
+
+        send_bookkeeping('dofile("/dom-main/controller/mode.lua").connect()')
 
         poller = threading.Thread(target=poll_loop, daemon=True)
         poller.start()
@@ -778,6 +842,7 @@ def main():
             pass
         finally:
             stop.set()
+            send_bookkeeping('dofile("/dom-main/controller/mode.lua").disconnect()')
 
     elif args.cmd in SHORTCUT_NAMES:
         description, inner = build_shortcut(args.cmd, args)

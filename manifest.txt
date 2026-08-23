@@ -24,6 +24,7 @@ dom-main/controller/fleet_listener.lua
 dom-main/controller/roster.lua
 dom-main/controller/worldstore.lua
 dom-main/controller/block_sync.lua
+dom-main/controller/mode.lua
 
 # --- shared libraries ---------------------------------------------------
 lib/exec.lua
