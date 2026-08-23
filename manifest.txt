@@ -9,12 +9,22 @@
 # The bootstrap updates itself. Keep this line.
 startup.lua
 
-# --- remote console ---------------------------------------------------
+# --- remote console (controller-only -- see lib/remote.lua) -----------
 lib/remote.lua
 remote-setup.lua
 main.lua
 
+# --- fleet transport (turtle-only -- see lib/fleet.lua) ----------------
+lib/fleet.lua
+dom-main/turtle_main.lua
+
+# --- fleet controller (controller-only) --------------------------------
+dom-main/controller/controller_main.lua
+dom-main/controller/fleet_listener.lua
+dom-main/controller/roster.lua
+
 # --- shared libraries ---------------------------------------------------
+lib/exec.lua
 lib/fuel.lua
 lib/nav.lua
 lib/pathfind.lua

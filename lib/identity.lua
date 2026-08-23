@@ -119,5 +119,15 @@ function M.get(cfg)
   return name
 end
 
+-- Overwrites this device's persisted identity -- used by lib/fleet.lua
+-- when a controller detects a genuine name collision at registration
+-- (two different devices both picked the same champion name blind, since
+-- rednet registration has no relay to check /status against first) and
+-- tells this one to switch to a fresh name instead.
+function M.set(name)
+  save(name)
+  if os.setComputerLabel then os.setComputerLabel(name) end
+end
+
 _G.__IDENTITY_MODULE = M
 return M

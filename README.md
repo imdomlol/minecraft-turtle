@@ -64,14 +64,19 @@ Every reboot after that self-updates.
 
 ## Remote console
 
-Turtles are usually scattered across the map, out of rednet range of each
-other, so remote control works over HTTP instead: each turtle polls a
-small relay server for queued commands, runs them, and posts the output
-back. This is the same `http` API `startup.lua` already uses to reach
-GitHub, so no wireless modem or in-game host computer is required.
+Turtles don't talk to the relay over HTTP directly. Instead, one plain
+Computer per Minecraft dimension — the **fleet controller** — is
+equipped with an ender modem and is the only thing that polls a small
+relay server for queued commands; turtles (each equipped with an ender
+modem of their own, in their left slot) talk to their dimension's
+controller over `rednet` (`lib/fleet.lua`) instead. Since ender modems
+can't cross dimensions, "one controller per dimension" and "a turtle
+only ever finds its own dimension's controller" both fall out for free —
+there's nothing to configure.
 
 Because this repo is public, the relay's address and shared token are
-**not** committed to it — they're entered once per turtle via
+**not** committed to it — they're entered once **per controller** (not
+per turtle — turtles need no setup at all, see below) via
 `remote-setup.lua` and stored in `/state/remote.cfg`, which `startup.lua`
 never wipes.
 
@@ -147,10 +152,11 @@ A `401` means it made it all the way through (tunnel + relay + auth
 check) and just needs a token — that's success. A timeout or connection
 error means the tunnel or port forward isn't actually up yet.
 
-### 3. Point a turtle at it
+### 3. Point the controller at it
 
-On the turtle, after it's bootstrapped at least once (so `/lib/remote.lua`
-and `remote-setup.lua` exist):
+This step is done once **per dimension's controller computer**, not per
+turtle. On the controller, after it's bootstrapped at least once (so
+`/lib/remote.lua` and `remote-setup.lua` exist):
 
 ```
 remote-setup
@@ -159,9 +165,15 @@ remote-setup
 Enter the relay's URL — `http://1.2.3.4:8787` for a direct/forwarded
 setup, or `https://your-name.ngrok-free.app` for a tunnel — and the
 token (`cat server/.relay_token` if you used `start-relay.sh`). This
-runs once per turtle — re-run it later to change the server or rotate the
-token. `main.lua` (run automatically after every OTA update) then polls
+runs once per controller — re-run it later to change the server or
+rotate the token. `main.lua` (run automatically after every OTA update,
+on any device with no `turtle` API — i.e. a plain Computer) then polls
 the relay in the background for commands.
+
+Turtles need none of this. A turtle equipped with an ender modem finds
+its dimension's controller automatically over `rednet` the moment it
+boots — there's no URL or token to enter, and no per-turtle setup step
+at all.
 
 ### 4. Send commands from your machine
 
@@ -169,30 +181,40 @@ the relay in the background for commands.
 export RELAY_URL=http://localhost:8787   # talking to your own relay directly; no need to go via the tunnel
 export RELAY_TOKEN=$(cat server/.relay_token)
 
-python3 server/turtlectl.py list                       # which turtles have checked in
-python3 server/turtlectl.py send 12 turtle.getFuelLevel()
-python3 server/turtlectl.py send-all os.getComputerLabel()
-python3 server/turtlectl.py results 12
-python3 server/turtlectl.py watch 12                    # stream new results
-python3 server/turtlectl.py console 12                  # live feed of the turtle's screen
+python3 server/turtlectl.py list                        # which controllers have checked in
+python3 server/turtlectl.py roster Ferrum               # every turtle controller "Ferrum" currently knows about
+python3 server/turtlectl.py send Ferrum Lux turtle.getFuelLevel()
+python3 server/turtlectl.py send-fleet Ferrum os.getComputerLabel()   # every turtle behind Ferrum
+python3 server/turtlectl.py results Ferrum
+python3 server/turtlectl.py watch Ferrum                # stream new results
+python3 server/turtlectl.py console Ferrum              # live feed of the controller's screen (+ every turtle's log lines, tagged)
 ```
 
-Turtle IDs are a name assigned by `lib/identity.lua` (see below) — shown
-by `turtlectl.py list` alongside each turtle's last-seen time, and equal
-to its CraftOS label too. Commands are plain Lua, evaluated the same way
-CraftOS's own `lua` shell program does — bare expressions like
-`turtle.getFuelLevel()` print their return value, and `print(...)` output
-is captured too.
+Controller and turtle IDs are both names assigned by `lib/identity.lua`
+(see below) — a controller's is shown by `turtlectl.py list`, a turtle's
+by `turtlectl.py roster <controller>`, alongside last-seen time; each is
+equal to its CraftOS label too. Every turtle-targeting command needs
+*both* — the controller name so `turtlectl.py` knows which relay
+connection to use, and the turtle name so that controller knows which of
+its turtles to relay the command to over rednet (see
+`dom-main/controller/roster.lua`'s `proxy()`). Commands are plain Lua,
+evaluated the same way CraftOS's own `lua` shell program does — bare
+expressions like `turtle.getFuelLevel()` print their return value, and
+`print(...)` output is captured too.
 
 `console` is different from `watch`: `watch` only shows the result of
 commands you send through the relay, while `console` mirrors everything
-that ever gets printed to the turtle's actual screen — boot messages,
-whatever a "day job" script prints on its own, and remote command
-output — as it happens, polled at ~1-2s resolution. It works by wrapping
-the turtle's `term` so every write is both shown on the real screen and
-shipped to the relay; the relay keeps the last ~20K characters per
-turtle in memory only (not persisted to `relay_state.json`), so history
-resets on a relay restart.
+that ever gets printed to the controller's own screen *and* every
+turtle's — boot messages, whatever a "day job" script prints on its own,
+and command output — as it happens, polled at ~1-2s resolution. A
+turtle's own lines arrive tagged `[name] ...` (`lib/fleet.lua` streams
+them to its controller over rednet; `dom-main/controller/roster.lua`
+folds them into the controller's own log feed), so one `console` session
+shows the whole fleet in that dimension, not just one device. It works
+by wrapping `term` so every write is both shown on the real screen and
+shipped to the relay; the relay keeps the last ~20K characters per id in
+memory only (not persisted to `relay_state.json`), so history resets on
+a relay restart.
 
 `console` also accepts input, not just output: type a command and press
 enter to send it (queued the same way `send` does) while still watching
@@ -202,8 +224,9 @@ Ctrl-C to stop. Up/down arrows cycle through previously typed lines
 within that session (via Python's `readline`, POSIX only).
 
 A command's own progress streams live too, not just the final result:
-`lib/remote.lua` mirrors whatever a command `print()`s as it happens,
-not only once the whole command returns — important for anything
+`lib/exec.lua` (shared by `lib/remote.lua` and `lib/fleet.lua`) mirrors
+whatever a command `print()`s as it happens, not only once the whole
+command returns — important for anything
 long-running (a `pathfind.goto()` across a big distance, say), which
 would otherwise leave the console looking dead for the entire duration
 before dumping everything at once at the end.
@@ -216,64 +239,76 @@ to forget which lib/*.lua file a call lives in, or whether it's a
 background job (`request`/`stop`) versus a plain call. `turtlectl.py` has
 shortcuts that build the right command for you:
 
+Every one of these takes `<controller> <turtle>` — which controller to
+talk to over the relay, then which of its turtles to relay the command
+to:
+
 ```
-python3 server/turtlectl.py goto Lux -89 55 -87 --dig          # background job, cancellable (--dig alone means "safe" -- see below)
-python3 server/turtlectl.py goto Lux -89 55 -87 --dig all       # dig through a chest too, not just route around it
-python3 server/turtlectl.py mine Lux --width-facing west --length 12   # any omitted flag keeps its default
-python3 server/turtlectl.py mine Lux --length-facing all --height 40 --width 20
-python3 server/turtlectl.py mine Lux --no-tidy --no-observant  # --tidy/--observant/--thorough, all default true
-python3 server/turtlectl.py stop Lux                           # stop the running job, back to idle
-python3 server/turtlectl.py jobstatus Lux
-python3 server/turtlectl.py pos Lux
-python3 server/turtlectl.py pos Lux --full                      # spin to see all 6 surrounding blocks
-python3 server/turtlectl.py setpos Lux -89 70 -87 west          # manual calibration, e.g. after an F3 check
-python3 server/turtlectl.py turnleft Lux
-python3 server/turtlectl.py turnright Lux
-python3 server/turtlectl.py inv Lux
-python3 server/turtlectl.py home Lux --dig
-python3 server/turtlectl.py markhome Lux
-python3 server/turtlectl.py findchest Lux --radius 12           # or --x/--y/--z to search elsewhere
-python3 server/turtlectl.py dump Lux                            # find a chest nearby (radius 8) and empty into it
-python3 server/turtlectl.py dump Lux --x 100 --y 64 --z -200    # a known chest location (exact by default)
+python3 server/turtlectl.py goto Ferrum Lux -89 55 -87 --dig          # background job, cancellable (--dig alone means "safe" -- see below)
+python3 server/turtlectl.py goto Ferrum Lux -89 55 -87 --dig all       # dig through a chest/ComputerCraft block too, not just route around it
+python3 server/turtlectl.py mine Ferrum Lux --width-facing west --length 12   # any omitted flag keeps its default
+python3 server/turtlectl.py mine Ferrum Lux --length-facing all --height 40 --width 20
+python3 server/turtlectl.py mine Ferrum Lux --no-tidy --no-observant  # --tidy/--observant/--thorough, all default true
+python3 server/turtlectl.py stop Ferrum Lux                           # stop the running job, back to idle
+python3 server/turtlectl.py jobstatus Ferrum Lux
+python3 server/turtlectl.py pos Ferrum Lux
+python3 server/turtlectl.py pos Ferrum Lux --full                      # spin to see all 6 surrounding blocks
+python3 server/turtlectl.py setpos Ferrum Lux -89 70 -87 west          # manual calibration, e.g. after an F3 check
+python3 server/turtlectl.py turnleft Ferrum Lux
+python3 server/turtlectl.py turnright Ferrum Lux
+python3 server/turtlectl.py inv Ferrum Lux
+python3 server/turtlectl.py home Ferrum Lux --dig
+python3 server/turtlectl.py markhome Ferrum Lux
+python3 server/turtlectl.py findchest Ferrum Lux --radius 12           # or --x/--y/--z to search elsewhere
+python3 server/turtlectl.py dump Ferrum Lux                            # find a chest nearby (radius 8) and empty into it
+python3 server/turtlectl.py dump Ferrum Lux --x 100 --y 64 --z -200    # a known chest location (exact by default)
+python3 server/turtlectl.py roster Ferrum                              # controller-only -- no turtle argument
 ```
 
 `--dig` on `goto`/`home` takes an optional mode: bare `--dig` (same as
-`--dig safe`) digs/attacks through obstacles but never destroys a chest —
-it routes around one instead, the same as it would an undiggable block —
-since a dig-through trip has no way to tell a player's storage chest
-apart from ordinary terrain otherwise. `--dig all` is an explicit opt-in
-to dig through a chest too. `mine` has no `--dig` flag at all (it always
-digs, by nature), but is chest-safe unconditionally regardless — it
-always routes around a chest in its path rather than destroying it.
+`--dig safe`) digs/attacks through obstacles but never destroys a chest
+or a ComputerCraft block (another turtle, computer, modem, etc) — it
+routes around either instead, the same as it would an undiggable block —
+since a dig-through trip has no way to tell a player's storage chest (or
+another turtle's computer) apart from ordinary terrain otherwise. `--dig
+all` is an explicit opt-in to dig through either too. `mine` has no
+`--dig` flag at all (it always digs, by nature), but is chest-safe and
+ComputerCraft-safe unconditionally regardless — it always routes around
+either in its path rather than destroying it.
 
 Every shortcut above also takes `--wait` (block and print the result once
 it completes — no separate `results`/`console` lookup for a quick check)
 and `--wait-timeout` (seconds, default 120). `--help` on any of them
 lists its flags, e.g. `turtlectl.py goto --help`.
 
-The same shortcuts (minus `<id>`, already implied, and `--wait`, pointless
-when you're already watching the live feed) work typed directly into an
-active `console <id>` session too, e.g. `goto -89 55 -87 --dig` or `mine
---width-facing west --length 12`. Anything whose first word isn't a shortcut name
-is sent through unchanged, as raw Lua. Type `help` in a console session to
-list them all without leaving it.
+The same shortcuts (minus `<controller>`, already implied by the session,
+and `--wait`, pointless when you're already watching the live feed) work
+typed directly into an active `console <controller>` session too —
+turtle-targeting ones still need a `<turtle>` first, e.g. `goto Lux -89
+55 -87 --dig` or `mine Lux --width-facing west --length 12`; `roster`
+takes none. Anything whose first word isn't a shortcut name is sent
+through unchanged, as raw Lua, run on the controller itself (not
+proxied to any turtle). Type `help` in a console session to list them
+all without leaving it.
 
 ## lib/identity.lua
 
-Assigns each turtle a stable name to identify itself to the relay with —
-`lib/remote.lua` uses this instead of the raw CC:Tweaked computer ID
-(`os.getComputerID()`). That matters because computer IDs are only
-unique *within a single world*: if more than one Minecraft server shares
-this same relay, two turtles on two different servers can easily both be
-ID 0. Since `relay.py` keys everything — the command queue, results,
-live console log — purely by that id string, two turtles colliding on it
-silently interleave into the same slot: a command meant for one can
-execute on the other, and their output mixes together. This is exactly
-what happened once already in this project.
+Assigns a stable name to identify a device with, used by both
+`lib/remote.lua` (a controller identifying itself to the relay) and
+`lib/fleet.lua` (a turtle identifying itself to its controller), instead
+of the raw CC:Tweaked computer ID (`os.getComputerID()`). That matters
+because computer IDs are only unique *within a single world*: if more
+than one Minecraft server shares this same relay, two controllers on two
+different servers can easily both be ID 0. Since `relay.py` keys
+everything — the command queue, results, live console log — purely by
+that id string, two colliding on it silently interleave into the same
+slot: a command meant for one can execute on the other, and their output
+mixes together. This is exactly what happened once already in this
+project.
 
 Names come from `lib/champions.lua` (League of Legends champions,
 cleaned to plain alphanumeric CamelCase so they're safe directly in a
-relay URL). On first run, a turtle GETs the relay's `/status` to see
+relay URL). On first run, a controller GETs the relay's `/status` to see
 which names are already taken, picks a free one at random, sets it as
 both its CraftOS label (`os.setComputerLabel()`) and its relay id, and
 persists it to `/state/identity.state` — so it keeps that name across
@@ -282,12 +317,92 @@ fragmented result history) each time. If the relay can't be reached yet,
 it still picks a name (best-effort, no uniqueness check) rather than
 getting stuck unable to identify itself at all.
 
+A turtle picks its name the same way, but with no relay `/status` to
+check at all — rednet registration has no shared directory to consult
+before picking (see `M.get(nil)` in `lib/fleet.lua`). Instead, its
+controller (the one authority that actually knows its whole roster of
+turtles) is what detects a genuine collision, the moment two different
+turtles report the same name in a heartbeat, and tells the loser to
+switch via `M.set(name)` — see `dom-main/controller/roster.lua`'s
+`upsert()`.
+
 The uniqueness check is a check-then-act, not an atomic claim — two
-turtles picking their very first identity at the exact same instant
+devices picking their very first identity at the exact same instant
 could in principle pick the same "free" name. Not worth a real
 distributed lock for how narrow that window is (this runs once per
-turtle's lifetime, not every boot): `dofile("/lib/identity.lua").get(cfg)`
+device's lifetime, not every boot): `dofile("/lib/identity.lua").get(cfg)`
 directly if you ever need to force a re-check.
+
+## lib/exec.lua
+
+"Run this Lua string, capture its output" — pulled out of what used to
+be `lib/remote.lua`'s own private `execute()`, since `lib/fleet.lua` (the
+rednet transport) needs the exact same behavior and shouldn't have to
+duplicate it. Tries an implicit `"return " ..` prefix first, same as
+CraftOS's own `lua` shell program, so a bare expression reports its
+return value; falls back to the raw parse for genuine statements. Also
+owns the pending-log buffer both transports stream to their relay/rednet
+peer for a live console to tail:
+
+```
+dofile("/lib/exec.lua").run("turtle.getFuelLevel()")  -- ok, output
+dofile("/lib/exec.lua").pendingLog()                  -- text accumulated since the last drain
+dofile("/lib/exec.lua").dropSentLog(sentChunk)        -- remove exactly what was just shipped out
+dofile("/lib/exec.lua").append("[Lux] hello\n")       -- feed in externally-sourced text (see roster.lua)
+```
+
+## lib/fleet.lua
+
+A turtle's transport to its dimension's fleet controller, replacing
+`lib/remote.lua`'s HTTP polling. Opens `rednet` on the ender modem
+always equipped in the left slot, finds its controller via
+`rednet.lookup()` (no setup needed — a fixed protocol name, and ender
+modems can't cross dimensions, so there's only ever one controller a
+turtle can find), and registers via its first heartbeat rather than a
+separate message. Runs three loops in parallel: one blocks on
+`rednet.receive()` and answers exec requests through `lib/exec.lua`
+(event-driven, no busy-polling, unlike the HTTP side); one sends a
+status heartbeat (fuel, position, `lib/job.lua` status) every ~3s; one
+ships `lib/exec.lua`'s pending log to the controller every ~1.5s. All
+three are fire-and-forget over rednet — there's no delivery confirmation
+the way an HTTP response gives `lib/remote.lua` one, so a dropped
+heartbeat/log chunk is simply skipped rather than retried; the next tick
+re-establishes freshness regardless.
+
+Since rednet registration has no relay `/status` to check names against
+first, a genuine collision (two different turtles reporting the same
+name) is instead caught by the controller — see `dom-main/controller/
+roster.lua` — which replies with a `"rename"` message; a turtle applies
+it via `lib/identity.lua`'s `M.set(name)` and keeps going under the new
+name immediately.
+
+## dom-main/controller/
+
+The fleet controller's own code, run by `dom-main/controller/
+controller_main.lua` on any device with no `turtle` API (a plain
+Computer) — `main.lua`'s dispatcher sends every other device to
+`dom-main/turtle_main.lua` instead. A controller runs `lib/remote.lua`
+completely unchanged (it's now the only thing in its dimension polling
+the relay) alongside `fleet_listener.lua`, which hosts this dimension's
+`rednet` protocol and hands every incoming message to `roster.lua`.
+
+`roster.lua` tracks every turtle heard from (`M.report()`, behind
+`turtlectl.py roster`) and is the one function operator commands and the
+(future) autopilot scheduler both go through to actually reach a turtle:
+
+```
+dofile("/dom-main/controller/roster.lua").proxy("Lux", command)      -- run `command` on turtle Lux, wait for its result
+dofile("/dom-main/controller/roster.lua").proxyAll(command)          -- same, for every known turtle, sequentially
+dofile("/dom-main/controller/roster.lua").report()                   -- { name -> { label, fuel, position, job, secondsAgo } }
+```
+
+`M.proxy()`'s own wait loop re-enters `M.handleMessage()` for anything
+that arrives while it's waiting that *isn't* its answer (another
+turtle's heartbeat or log line) — so a slow reply from one turtle never
+means a dropped heartbeat from another. This relies on CraftOS resuming
+every coroutine parked in `rednet.receive()` with the same event rather
+than handing it to just one of them, so `fleet_listener.lua`'s own
+receive loop and a `proxy()` call's nested one can safely coexist.
 
 ## lib/fuel.lua
 
@@ -422,6 +537,12 @@ etc). Used by `lib/pathfind.lua`'s `"safe"` dig mode and by
 `dom-main/mining/vertical.lua`'s own tunnel digging to recognize a chest
 and route around it instead of destroying it — see both sections below.
 
+`nav.isComputerCraftBlock(name)` — is a block name a ComputerCraft block
+(another turtle, computer, modem, monitor, disk drive, etc — anything in
+the `computercraft:` namespace). Used the same way and in the same two
+places as `nav.isChest()` above, so a job never bulldozes another turtle
+or computer just because it happened to be in the way.
+
 ## lib/pathfind.lua
 
 Moves the turtle toward a target position, digging/attacking through
@@ -437,11 +558,13 @@ dofile("/lib/pathfind.lua").goto(-1358, 65, -4337, { tolerance = 1, allowDig = "
   never digs — blocked means blocked, route around via the other axes or
   give up. `"safe"` digs/attacks through obstacles, same as before this
   distinction existed (a bare `true` is still accepted, as an alias for
-  `"safe"`, so old callers keep working), *except* a chest — that gets
+  `"safe"`, so old callers keep working), *except* a chest or a
+  ComputerCraft block (another turtle, computer, modem, etc) — those get
   routed around instead, same as an undiggable block, since a dig-through
-  trip has no way to tell a player's storage chest apart from ordinary
-  terrain otherwise. `"all"` is an explicit opt-in to dig through a chest
-  too, for when that's genuinely what's wanted.
+  trip has no way to tell a player's storage chest (or another turtle's
+  computer) apart from ordinary terrain otherwise. `"all"` is an explicit
+  opt-in to dig through either too, for when that's genuinely what's
+  wanted.
 - `shouldStop` (optional, a `function() -> boolean`): checked before
   every single step — the finest-grained interruption point in this
   repo. A multi-hundred-block trip (or a merely slow one) would otherwise
@@ -523,11 +646,12 @@ session shares those same instances too.
 ## lib/job.lua
 
 A background job runner, so a long-running task can be redirected from
-the remote console *while it's running*. Without this, a remote command
-blocks the poll loop until it returns (see `lib/remote.lua`'s
-`execute()`) — a job meant to run forever would starve the console of
-ever hearing a "stop". `main.lua` runs `job.run()` alongside
-`remote.run()`, and registers every known job by name before starting it:
+the remote console *while it's running*. Without this, a command blocks
+the poll/listen loop until it returns (see `lib/exec.lua`'s `M.run()`,
+shared by both `lib/remote.lua` and `lib/fleet.lua`) — a job meant to run
+forever would starve the console of ever hearing a "stop".
+`dom-main/turtle_main.lua` runs `job.run()` alongside `fleet.run()`, and
+registers every known job by name before starting it:
 
 ```
 job.register("mine_vertical", dofile("/dom-main/mining/vertical.lua").run)
@@ -548,9 +672,9 @@ expected to call `shouldStop()` between steps, returning promptly if it's
 true — how often depends on the job (see `dom-main/mining/vertical.lua`
 for the pattern, and its own caveat about how coarse-grained that check
 is there). Like `lib/nav.lua`, this caches itself on `_G`, since
-`main.lua`'s `dofile()` (running the loop) and a remote command's
-`dofile()` (requesting a switch) must resolve to the same instance or the
-request vanishes into a copy nothing is watching.
+`dom-main/turtle_main.lua`'s `dofile()` (running the loop) and a remote
+command's `dofile()` (requesting a switch) must resolve to the same
+instance or the request vanishes into a copy nothing is watching.
 
 A built-in `"goto"` job is always registered, no setup needed — it exists
 so an ad-hoc long trip doesn't have to block the console the way running
@@ -596,9 +720,16 @@ dofile("/lib/chestfinder.lua").find({ x = 100, y = 64, z = -20, maxRadius = 12 }
 ```
 
 Defaults to searching around `lib/home.lua`'s recorded position if no
-`x`/`y`/`z` is given. Non-destructive: never digs, and gives up if a step
-is blocked rather than plowing through obstacles — a locator digging
-through walls on its own would be surprising. On success, returns `{ x,
+`x`/`y`/`z` is given. Getting there digs through obstacles (`"safe"`
+mode — never a chest or ComputerCraft block) since that's typically a
+trip home from wherever a job just finished digging, through terrain
+nothing has opened up yet; without this, a mining job's own full-
+inventory deposit (see `dom-main/mining/vertical.lua`) would fail every
+time home isn't already reachable by walking. The search itself, once
+there, stays non-destructive: it gives up if a step is blocked rather
+than plowing through obstacles — a locator digging through walls near a
+base full of player-built structures would be surprising. On success,
+returns `{ x,
 y, z, name }` for the chest and leaves the turtle facing it (ready to
 `turtle.drop()` into it); on failure, returns `nil, reason` and the
 turtle is back where the search started, not stranded mid-spiral.
@@ -781,13 +912,15 @@ already-surveyed ground, also uses `pathfind.goto()` with `allowDig =
 "safe"` — so a stray surface obstacle can't stall an unattended run; edit
 the file if you'd rather it stop and wait instead.
 
-Mining never destroys a chest — not just this repositioning travel
-(`"safe"` mode already routes around one, same as `goto`/`home` do), but
-the actual ore-digging tunnel too, which has no `allowDig` switch to
-begin with (mining always digs, by nature) and refuses a chest
-unconditionally: hitting one mid-leg stops just that leg with a clear
-"chest in the way" reason instead of consuming it, the same as running
-into undiggable bedrock would. See `nav.isChest()` above.
+Mining never destroys a chest or a ComputerCraft block (another turtle,
+computer, modem, etc) — not just this repositioning travel (`"safe"` mode
+already routes around one, same as `goto`/`home` do), but the actual
+ore-digging tunnel too, which has no `allowDig` switch to begin with
+(mining always digs, by nature) and refuses either unconditionally:
+hitting one mid-leg stops just that leg with a clear "chest in the way"
+or "ComputerCraft block in the way" reason instead of consuming it, the
+same as running into undiggable bedrock would. See `nav.isChest()` and
+`nav.isComputerCraftBlock()` above.
 
 Real bedrock near the world floor is patchy, not a clean plane, and is
 undiggable regardless of `allowDig` — so the horizontal repositioning
@@ -811,7 +944,9 @@ both there *and* after every successful forward leg step, so a full
 inventory gets caught within a single leg instead of potentially sitting
 full for however long the rest of a deep pass takes. If the inventory's
 full and `tidy` (see below) is true, it finds a chest
-(`lib/chestfinder.lua`, defaulting to `lib/home.lua`'s position), drops
+(`lib/chestfinder.lua`, defaulting to `lib/home.lua`'s position — digging
+through obstacles to actually get there, since that's usually a trip back
+through terrain the pass just finished mining, not open ground), drops
 everything in, and returns to the exact position/heading it was at
 before continuing — including resuming a leg it was partway through. If
 no chest can be found, or the one found can't take everything, or `tidy`

@@ -2,55 +2,71 @@
 """
 turtlectl.py -- operator CLI for the turtle relay server (see relay.py).
 
+Turtles no longer talk to the relay directly -- a fleet controller
+(one plain Computer per Minecraft dimension) is the only thing that
+polls the relay; turtles talk to their controller over rednet
+(lib/fleet.lua). Every turtle-targeting command below is therefore
+addressed by *both* a controller id and a turtle id -- the controller is
+who this CLI actually talks to over HTTP, and the turtle id tells that
+controller which of its turtles to relay the command to (see
+dom-main/controller/roster.lua's proxy()).
+
 Usage:
   turtlectl.py list
-  turtlectl.py send <id> <command...>
-  turtlectl.py send-all <command...>
-  turtlectl.py results <id> [-n N]
-  turtlectl.py watch <id>
-  turtlectl.py console <id>   -- live screen feed; type a command + enter to send it
+  turtlectl.py send <controller> <turtle> <command...>
+  turtlectl.py send-fleet <controller> <command...>   -- every turtle behind one controller
+  turtlectl.py results <controller> [-n N]
+  turtlectl.py watch <controller>
+  turtlectl.py console <controller>   -- live screen feed; type a command + enter to send it
+  turtlectl.py roster <controller>    -- every turtle this controller currently knows about
 
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
-jobs vs plain calls -- these build the right dofile(...) command for you:
-  turtlectl.py goto <id> <x> <y> <z> [--tolerance N] [--dig [safe|all]]
-  turtlectl.py mine <id> [--width-facing north|east|south|west]
+jobs vs plain calls -- these build the right dofile(...) command for you,
+and (except `roster` above, which queries the controller itself) route
+it through the named controller to the named turtle:
+  turtlectl.py goto <controller> <turtle> <x> <y> <z> [--tolerance N] [--dig [safe|all]]
+  turtlectl.py mine <controller> <turtle> [--width-facing north|east|south|west]
                          [--length-facing north|east|south|west|all]
                          [--length N] [--step-down N] [--height N] [--width N]
                          [--min-fuel N] [--column-step N] [--column-dy N]
                          [--no-tidy] [--no-observant] [--no-thorough]
-  turtlectl.py stop <id>              -- stop the running job, back to idle
-  turtlectl.py jobstatus <id>
-  turtlectl.py pos <id> [--full]                 -- --full spins to see all 6 surrounding blocks
-  turtlectl.py setpos <id> <x> <y> <z> <facing>  -- manual calibration (facing: 0-3 or compass name)
-  turtlectl.py turnleft <id>
-  turtlectl.py turnright <id>
-  turtlectl.py inv <id>
-  turtlectl.py home <id> [--dig [safe|all]]  -- go to the marked home position
-  turtlectl.py markhome <id>          -- mark the current position as home
-  turtlectl.py findchest <id> [--x N --y N --z N] [--radius N]
-  turtlectl.py dump <id> [--x N --y N --z N] [--radius N]
+  turtlectl.py stop <controller> <turtle>              -- stop the running job, back to idle
+  turtlectl.py jobstatus <controller> <turtle>
+  turtlectl.py pos <controller> <turtle> [--full]                 -- --full spins to see all 6 surrounding blocks
+  turtlectl.py setpos <controller> <turtle> <x> <y> <z> <facing>  -- manual calibration (facing: 0-3 or compass name)
+  turtlectl.py turnleft <controller> <turtle>
+  turtlectl.py turnright <controller> <turtle>
+  turtlectl.py inv <controller> <turtle>
+  turtlectl.py home <controller> <turtle> [--dig [safe|all]]  -- go to the marked home position
+  turtlectl.py markhome <controller> <turtle>          -- mark the current position as home
+  turtlectl.py findchest <controller> <turtle> [--x N --y N --z N] [--radius N]
+  turtlectl.py dump <controller> <turtle> [--x N --y N --z N] [--radius N]
                          -- find a chest and empty the inventory into it; no
                          -- coords searches near the turtle (radius 8 default),
                          -- coords with no radius means exactly there (radius 0)
 
---dig on its own (or --dig safe) never digs through a chest -- it routes
-around one like any other obstacle it can't clear, since a dig-through
-trip has no way to tell a player's storage chest apart from ordinary
-terrain otherwise. --dig all is a deliberate opt-in to dig through a
-chest too, for when that's really what's wanted. Mining (`mine`) has no
---dig switch at all since it always digs by nature, but is chest-safe
-unconditionally -- it always routes around a chest in its path.
+--dig on its own (or --dig safe) never digs through a chest or a
+ComputerCraft block (another turtle, computer, modem, etc) -- it routes
+around either like any other obstacle it can't clear, since a dig-through
+trip has no way to tell a player's storage chest (or another turtle's
+computer) apart from ordinary terrain otherwise. --dig all is a
+deliberate opt-in to dig through either too, for when that's really
+what's wanted. Mining (`mine`) has no --dig switch at all since it always
+digs by nature, but is chest-safe and ComputerCraft-safe unconditionally
+-- it always routes around either in its path.
 
 All of the above accept --wait (and --wait-timeout, default 120s) to
 block and print the result once it completes, instead of just queuing
 it -- handy for a quick check without a separate `results`/`console` look.
 
-The same shortcuts (minus <id>, which is already implied, and --wait,
-which is pointless when you're already watching the live feed) also work
-typed directly into an active `console` session, e.g. `goto -89 55 -87
---dig` or `mine --length 12`. Anything whose first word isn't a shortcut
-name is sent through unchanged, as raw Lua, same as before.
+The same shortcuts (minus <controller>, which is already implied by an
+active console session, and --wait, which is pointless when you're
+already watching the live feed) also work typed directly into an active
+`console` session -- turtle-targeting ones still need a <turtle> first,
+e.g. `goto Lux -89 55 -87 --dig` or `mine Lux --length 12`; `roster`
+takes none. Anything whose first word isn't a shortcut name is sent
+through unchanged, as raw Lua, run on the controller itself.
 
 Reads RELAY_URL and RELAY_TOKEN from the environment; --url/--token override.
 """
@@ -94,10 +110,10 @@ def print_result(r):
     print(f"[{status}] {r.get('command')}\n{r.get('output')}\n")
 
 
-def wait_for_result(url, token, tid, cmd_id, timeout):
+def wait_for_result(url, token, controller, cmd_id, timeout):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        results = request(f"{url}/results?id={tid}", token)
+        results = request(f"{url}/results?id={controller}", token)
         for r in results:
             if r.get("cmd_id") == cmd_id:
                 return r
@@ -106,28 +122,48 @@ def wait_for_result(url, token, tid, cmd_id, timeout):
 
 
 def queue(url, args, description, command):
-    """Queues `command` for args.id, prints a one-line confirmation, and --
+    """Queues `command` for args.controller, prints a one-line confirmation, and --
     if args.wait is set -- blocks for the result and prints it too."""
-    res = request(f"{url}/cmd?id={args.id}", args.token, "POST", {"command": command})
-    print(f"queued {res['cmd_id']} on turtle {args.id}: {description}")
+    res = request(f"{url}/cmd?id={args.controller}", args.token, "POST", {"command": command})
+    print(f"queued {res['cmd_id']} on controller {args.controller}: {description}")
     if getattr(args, "wait", False):
         print("waiting for result...")
-        r = wait_for_result(url, args.token, args.id, res["cmd_id"], args.wait_timeout)
+        r = wait_for_result(url, args.token, args.controller, res["cmd_id"], args.wait_timeout)
         if r:
             print_result(r)
         else:
             print(f"(no result after {args.wait_timeout}s -- it may still be running; "
-                  f"check with `results {args.id}` or `console {args.id}`)")
+                  f"check with `results {args.controller}` or `console {args.controller}`)")
 
 
 def lua_bool(b):
     return "true" if b else "false"
 
 
+def lua_string(s):
+    """Escapes an arbitrary Python string as a double-quoted Lua string
+    literal -- used to embed a turtle name or a raw command as a Lua
+    argument (dom-main/controller/roster.lua's proxy()/proxyAll()),
+    rather than the long-bracket [[ ]] form, since a `send`'s raw command
+    text isn't under our control and could itself contain `]]`."""
+    escaped = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+def proxy_wrap(turtle, inner_command):
+    """Wraps a Lua command meant for one specific turtle so it actually
+    runs there: the outer command (what gets queued for the controller)
+    asks dom-main/controller/roster.lua to relay `inner_command` over
+    rednet and wait for the result -- see roster.lua's M.proxy() for why
+    this needs no changes on the turtle or relay.py side at all."""
+    return f'return dofile("/dom-main/controller/roster.lua").proxy({lua_string(turtle)}, {lua_string(inner_command)})'
+
+
 def lua_dig(mode):
     """mode is None (no --dig -- never dig), "safe" (dig, but never a
-    chest -- the default the instant --dig is given at all), or "all"
-    (dig through anything, chests included -- an explicit opt-in)."""
+    chest or ComputerCraft block -- the default the instant --dig is
+    given at all), or "all" (dig through anything, chests and
+    ComputerCraft blocks included -- an explicit opt-in)."""
     if mode is None:
         return "false"
     return f'"{mode}"'
@@ -145,6 +181,10 @@ def facing_lua(facing):
 # `goto ...` line typed into an active `console` session -- ns just needs
 # the same attribute names in both cases (see build_console_parser()
 # below, whose subparsers mirror main()'s). Returns (description, lua).
+# TURTLE_SHORTCUTS entries build the command that runs *on the turtle*
+# (proxy_wrap() handles getting it there); CONTROLLER_SHORTCUTS entries
+# (currently just `roster`) build a command that runs on the controller
+# itself and are queued unwrapped.
 def build_shortcut(cmd, ns):
     if cmd == "goto":
         command = (
@@ -221,13 +261,18 @@ def build_shortcut(cmd, ns):
         params = "{ " + ", ".join(fields) + " }"
         return f"dump inventory {params}", f'return dofile("/lib/chestfinder.lua").dump({params})'
 
+    if cmd == "roster":
+        return "fleet roster", 'return dofile("/dom-main/controller/roster.lua").report()'
+
     raise ValueError(f"unknown shortcut: {cmd}")
 
 
-SHORTCUT_NAMES = {
+TURTLE_SHORTCUTS = {
     "goto", "mine", "stop", "jobstatus", "pos", "setpos", "turnleft", "turnright",
     "inv", "home", "markhome", "findchest", "dump",
 }
+CONTROLLER_SHORTCUTS = {"roster"}
+SHORTCUT_NAMES = TURTLE_SHORTCUTS | CONTROLLER_SHORTCUTS
 
 
 class ConsoleArgError(Exception):
@@ -245,14 +290,17 @@ class ConsoleArgParser(argparse.ArgumentParser):
             raise ConsoleArgError(message)
 
 
-# Same shortcuts as main()'s subparsers, minus <id> (the console is
-# already pinned to one turtle) and --wait/--wait-timeout (pointless --
-# you're already watching that turtle's live feed).
+# Same shortcuts as main()'s subparsers, minus <controller> (the console
+# is already pinned to one controller) and --wait/--wait-timeout
+# (pointless -- you're already watching the live feed). Turtle-targeting
+# shortcuts still need a <turtle> first, since one controller relays to
+# many turtles; `roster` (a controller shortcut) takes none.
 def build_console_parser():
     p = ConsoleArgParser(prog="", add_help=False)
     sub = p.add_subparsers(dest="cmd")
 
     gp = sub.add_parser("goto", add_help=False)
+    gp.add_argument("turtle")
     gp.add_argument("x", type=int)
     gp.add_argument("y", type=int)
     gp.add_argument("z", type=int)
@@ -260,6 +308,7 @@ def build_console_parser():
     gp.add_argument("--dig", nargs="?", const="safe", choices=["safe", "all"], default=None)
 
     mp = sub.add_parser("mine", add_help=False)
+    mp.add_argument("turtle")
     mp.add_argument("--width-facing", choices=["north", "east", "south", "west"])
     mp.add_argument("--length-facing", choices=["north", "east", "south", "west", "all"])
     mp.add_argument("--length", type=int)
@@ -273,69 +322,88 @@ def build_console_parser():
     mp.add_argument("--observant", action=argparse.BooleanOptionalAction, default=None)
     mp.add_argument("--thorough", action=argparse.BooleanOptionalAction, default=None)
 
-    sub.add_parser("stop", add_help=False)
-    sub.add_parser("jobstatus", add_help=False)
+    sp = sub.add_parser("stop", add_help=False)
+    sp.add_argument("turtle")
+
+    jp = sub.add_parser("jobstatus", add_help=False)
+    jp.add_argument("turtle")
 
     posp = sub.add_parser("pos", add_help=False)
+    posp.add_argument("turtle")
     posp.add_argument("--full", action="store_true")
 
     spc = sub.add_parser("setpos", add_help=False)
+    spc.add_argument("turtle")
     spc.add_argument("x", type=int)
     spc.add_argument("y", type=int)
     spc.add_argument("z", type=int)
     spc.add_argument("facing")
 
-    sub.add_parser("turnleft", add_help=False)
-    sub.add_parser("turnright", add_help=False)
+    tlp = sub.add_parser("turnleft", add_help=False)
+    tlp.add_argument("turtle")
 
-    sub.add_parser("inv", add_help=False)
+    trp = sub.add_parser("turnright", add_help=False)
+    trp.add_argument("turtle")
+
+    ip = sub.add_parser("inv", add_help=False)
+    ip.add_argument("turtle")
 
     hp = sub.add_parser("home", add_help=False)
+    hp.add_argument("turtle")
     hp.add_argument("--dig", nargs="?", const="safe", choices=["safe", "all"], default=None)
 
-    sub.add_parser("markhome", add_help=False)
+    mhp = sub.add_parser("markhome", add_help=False)
+    mhp.add_argument("turtle")
 
     fcp = sub.add_parser("findchest", add_help=False)
+    fcp.add_argument("turtle")
     fcp.add_argument("--x", type=int)
     fcp.add_argument("--y", type=int)
     fcp.add_argument("--z", type=int)
     fcp.add_argument("--radius", type=int, default=8)
 
     dp = sub.add_parser("dump", add_help=False)
+    dp.add_argument("turtle")
     dp.add_argument("--x", type=int)
     dp.add_argument("--y", type=int)
     dp.add_argument("--z", type=int)
     dp.add_argument("--radius", type=int)
 
+    sub.add_parser("roster", add_help=False)
+
     return p
 
 
 CONSOLE_HELP = """\
-shortcuts (id and --wait are implied -- you're already watching this turtle live):
-  goto <x> <y> <z> [--tolerance N] [--dig [safe|all]]  move to (x, y, z) as a background job
-  mine [--width-facing north|east|south|west] [--length-facing north|east|south|west|all]
+shortcuts (controller and --wait are implied -- you're already watching
+this controller live; turtle-targeting ones still need a <turtle> name):
+  goto <turtle> <x> <y> <z> [--tolerance N] [--dig [safe|all]]  move to (x, y, z) as a background job
+  mine <turtle> [--width-facing north|east|south|west] [--length-facing north|east|south|west|all]
        [--length N] [--step-down N] [--height N] [--width N] [--min-fuel N]
        [--column-step N] [--column-dy N] [--no-tidy] [--no-observant] [--no-thorough]
                                                 start the vertical strip miner (see below)
-  stop                                         stop the running job (back to idle)
-  jobstatus                                    what job is running / queued
-  pos [--full]                                 report position and surroundings (--full spins to see all 6 sides)
-  setpos <x> <y> <z> <facing>                  manually calibrate position/heading (0-3 or compass name)
-  turnleft                                     turn left 90 degrees
-  turnright                                    turn right 90 degrees
-  inv                                          report inventory contents
-  home [--dig [safe|all]]                      go to the marked home position
-  markhome                                     mark the current position as home
-  findchest [--x N --y N --z N] [--radius N]   search for a nearby chest
-  dump [--x N --y N --z N] [--radius N]        find a chest and empty the inventory into it
+  stop <turtle>                                stop the running job (back to idle)
+  jobstatus <turtle>                           what job is running / queued
+  pos <turtle> [--full]                        report position and surroundings (--full spins to see all 6 sides)
+  setpos <turtle> <x> <y> <z> <facing>         manually calibrate position/heading (0-3 or compass name)
+  turnleft <turtle>                            turn left 90 degrees
+  turnright <turtle>                           turn right 90 degrees
+  inv <turtle>                                 report inventory contents
+  home <turtle> [--dig [safe|all]]             go to the marked home position
+  markhome <turtle>                            mark the current position as home
+  findchest <turtle> [--x N --y N --z N] [--radius N]   search for a nearby chest
+  dump <turtle> [--x N --y N --z N] [--radius N]        find a chest and empty the inventory into it
                                                 (see below for how --x/--y/--z and --radius interact)
+  roster                                       every turtle this controller currently knows about
   help                                         show this list
 
---dig safe (bare --dig's default) routes around a chest instead of digging
-it, since a dig-through trip can't otherwise tell a player's storage chest
-apart from ordinary terrain; --dig all is an explicit opt-in to dig through
-one too. mine has no --dig switch (it always digs) but is chest-safe the
-same way, unconditionally.
+--dig safe (bare --dig's default) routes around a chest or a ComputerCraft
+block (another turtle, computer, modem, etc) instead of digging it, since
+a dig-through trip can't otherwise tell a player's storage chest (or
+another turtle's computer) apart from ordinary terrain; --dig all is an
+explicit opt-in to dig through either too. mine has no --dig switch (it
+always digs) but is chest-safe and ComputerCraft-safe the same way,
+unconditionally.
 
 mine's directions (must be perpendicular to each other):
   width-facing   direction the mine advances in over time (default north)
@@ -369,8 +437,9 @@ dump's --x/--y/--z and --radius interact:
   --x/--y/--z only      search AT those coords, radius 0 (exact -- assumed to be the chest)
   both given            search around those coords, that radius (an "error" margin)
 
-anything else you type is sent to the turtle as raw Lua, e.g.:
-  dofile("/lib/nav.lua").report()\
+anything else you type is sent to the controller as raw Lua (not proxied
+to any turtle), e.g.:
+  dofile("/dom-main/controller/roster.lua").report()\
 """
 
 
@@ -380,24 +449,26 @@ def main():
     p.add_argument("--token", default=os.environ.get("RELAY_TOKEN"))
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("list")
+    sub.add_parser("list", help="List known controllers.")
 
-    sp = sub.add_parser("send")
-    sp.add_argument("id")
+    sp = sub.add_parser("send", help="Send raw Lua to one turtle behind a controller.")
+    sp.add_argument("controller")
+    sp.add_argument("turtle")
     sp.add_argument("command", nargs="+")
 
-    sa = sub.add_parser("send-all")
-    sa.add_argument("command", nargs="+")
+    sf = sub.add_parser("send-fleet", help="Send raw Lua to every turtle behind a controller.")
+    sf.add_argument("controller")
+    sf.add_argument("command", nargs="+")
 
-    rp = sub.add_parser("results")
-    rp.add_argument("id")
+    rp = sub.add_parser("results", help="Recent results a controller has posted.")
+    rp.add_argument("controller")
     rp.add_argument("-n", type=int, default=10)
 
-    wp = sub.add_parser("watch")
-    wp.add_argument("id")
+    wp = sub.add_parser("watch", help="Live-tail a controller's results.")
+    wp.add_argument("controller")
 
-    cp = sub.add_parser("console")
-    cp.add_argument("id")
+    cp = sub.add_parser("console", help="Live console for a controller.")
+    cp.add_argument("controller")
 
     # Shortcuts below all accept --wait/--wait-timeout via this shared parent.
     waitp = argparse.ArgumentParser(add_help=False)
@@ -406,19 +477,25 @@ def main():
     waitp.add_argument("--wait-timeout", type=int, default=120,
                         help="Seconds to wait with --wait (default 120).")
 
+    rop = sub.add_parser("roster", parents=[waitp], help="Every turtle this controller currently knows about.")
+    rop.add_argument("controller")
+
     gp = sub.add_parser("goto", parents=[waitp], help="Move to (x, y, z) as a background job.")
-    gp.add_argument("id")
+    gp.add_argument("controller")
+    gp.add_argument("turtle")
     gp.add_argument("x", type=int)
     gp.add_argument("y", type=int)
     gp.add_argument("z", type=int)
     gp.add_argument("--tolerance", type=int, default=0)
     gp.add_argument("--dig", nargs="?", const="safe", choices=["safe", "all"], default=None,
                      help="Dig/attack through obstacles. Bare --dig (or --dig safe) never "
-                          "digs a chest, routing around it instead; --dig all digs through "
-                          "one too, as a deliberate opt-in.")
+                          "digs a chest or ComputerCraft block (turtle, computer, modem, "
+                          "etc), routing around it instead; --dig all digs through either "
+                          "too, as a deliberate opt-in.")
 
     mp = sub.add_parser("mine", parents=[waitp], help="Start the vertical strip miner.")
-    mp.add_argument("id")
+    mp.add_argument("controller")
+    mp.add_argument("turtle")
     mp.add_argument("--width-facing", choices=["north", "east", "south", "west"],
                      help="Direction the mine advances in over time, as it starts new width positions (default north).")
     mp.add_argument("--length-facing", choices=["north", "east", "south", "west", "all"],
@@ -446,52 +523,64 @@ def main():
                           "observant is on -- works even with observant off (default true).")
 
     stp = sub.add_parser("stop", parents=[waitp], help="Stop the running job (back to idle).")
-    stp.add_argument("id")
+    stp.add_argument("controller")
+    stp.add_argument("turtle")
 
     jsp = sub.add_parser("jobstatus", parents=[waitp], help="What job is running / queued.")
-    jsp.add_argument("id")
+    jsp.add_argument("controller")
+    jsp.add_argument("turtle")
 
     pp = sub.add_parser("pos", parents=[waitp], help="Report position and surroundings.")
-    pp.add_argument("id")
+    pp.add_argument("controller")
+    pp.add_argument("turtle")
     pp.add_argument("--full", action="store_true",
                      help="Spin to survey all 6 surrounding blocks (north/east/south/west/up/down), not just front/up/down.")
 
     spp = sub.add_parser("setpos", parents=[waitp],
                           help="Manually calibrate the tracked position/heading (e.g. after an F3 check).")
-    spp.add_argument("id")
+    spp.add_argument("controller")
+    spp.add_argument("turtle")
     spp.add_argument("x", type=int)
     spp.add_argument("y", type=int)
     spp.add_argument("z", type=int)
     spp.add_argument("facing", help="Heading 0-3, or a compass name (north/east/south/west).")
 
     tlp = sub.add_parser("turnleft", parents=[waitp], help="Turn left 90 degrees.")
-    tlp.add_argument("id")
+    tlp.add_argument("controller")
+    tlp.add_argument("turtle")
 
     trp = sub.add_parser("turnright", parents=[waitp], help="Turn right 90 degrees.")
-    trp.add_argument("id")
+    trp.add_argument("controller")
+    trp.add_argument("turtle")
 
     ip = sub.add_parser("inv", parents=[waitp], help="Report inventory contents.")
-    ip.add_argument("id")
+    ip.add_argument("controller")
+    ip.add_argument("turtle")
 
     hp = sub.add_parser("home", parents=[waitp], help="Go to the marked home position.")
-    hp.add_argument("id")
+    hp.add_argument("controller")
+    hp.add_argument("turtle")
     hp.add_argument("--dig", nargs="?", const="safe", choices=["safe", "all"], default=None,
                      help="Dig/attack through obstacles. Bare --dig (or --dig safe) never "
-                          "digs a chest, routing around it instead; --dig all digs through "
-                          "one too, as a deliberate opt-in.")
+                          "digs a chest or ComputerCraft block (turtle, computer, modem, "
+                          "etc), routing around it instead; --dig all digs through either "
+                          "too, as a deliberate opt-in.")
 
     mhp = sub.add_parser("markhome", parents=[waitp], help="Mark the current position as home.")
-    mhp.add_argument("id")
+    mhp.add_argument("controller")
+    mhp.add_argument("turtle")
 
     fcp = sub.add_parser("findchest", parents=[waitp], help="Search for a nearby chest.")
-    fcp.add_argument("id")
+    fcp.add_argument("controller")
+    fcp.add_argument("turtle")
     fcp.add_argument("--x", type=int, help="Search center (default: home position).")
     fcp.add_argument("--y", type=int)
     fcp.add_argument("--z", type=int)
     fcp.add_argument("--radius", type=int, default=8)
 
     dp = sub.add_parser("dump", parents=[waitp], help="Find a chest and empty the inventory into it.")
-    dp.add_argument("id")
+    dp.add_argument("controller")
+    dp.add_argument("turtle")
     dp.add_argument("--x", type=int, help="Chest location, if known (default: search near the turtle).")
     dp.add_argument("--y", type=int)
     dp.add_argument("--z", type=int)
@@ -509,32 +598,34 @@ def main():
     if args.cmd == "list":
         status = request(f"{url}/status", args.token)
         if not status:
-            print("no turtles have checked in yet")
+            print("no controllers have checked in yet")
         for tid, info in sorted(status.items(), key=lambda kv: kv[0]):
             label = info.get("label") or "(unlabeled)"
             print(f"{tid:>6}  {label:<20} last seen {info['seconds_ago']}s ago  pending={info['pending']}")
 
     elif args.cmd == "send":
         command = " ".join(args.command)
-        res = request(f"{url}/cmd?id={args.id}", args.token, "POST", {"command": command})
-        print(f"queued {res['cmd_id']} on turtle {args.id}: {command}")
+        wrapped = proxy_wrap(args.turtle, command)
+        res = request(f"{url}/cmd?id={args.controller}", args.token, "POST", {"command": wrapped})
+        print(f"queued {res['cmd_id']} on controller {args.controller} -> turtle {args.turtle}: {command}")
 
-    elif args.cmd == "send-all":
+    elif args.cmd == "send-fleet":
         command = " ".join(args.command)
-        res = request(f"{url}/cmd_all", args.token, "POST", {"command": command})
-        print(f"queued on {len(res['queued'])} turtle(s): {command}")
+        wrapped = f'return dofile("/dom-main/controller/roster.lua").proxyAll({lua_string(command)})'
+        res = request(f"{url}/cmd?id={args.controller}", args.token, "POST", {"command": wrapped})
+        print(f"queued {res['cmd_id']} on controller {args.controller} (fleet-wide): {command}")
 
     elif args.cmd == "results":
-        results = request(f"{url}/results?id={args.id}", args.token)
+        results = request(f"{url}/results?id={args.controller}", args.token)
         for r in results[-args.n:]:
             print_result(r)
 
     elif args.cmd == "watch":
         seen = 0
-        print(f"watching turtle {args.id} (ctrl-c to stop)")
+        print(f"watching controller {args.controller} (ctrl-c to stop)")
         try:
             while True:
-                results = request(f"{url}/results?id={args.id}", args.token)
+                results = request(f"{url}/results?id={args.controller}", args.token)
                 for r in results[seen:]:
                     print_result(r)
                 seen = len(results)
@@ -550,7 +641,7 @@ def main():
             last_err = None
             while not stop.is_set():
                 try:
-                    req = urllib.request.Request(f"{url}/log?id={args.id}&after={cursor[0]}")
+                    req = urllib.request.Request(f"{url}/log?id={args.controller}&after={cursor[0]}")
                     req.add_header("Authorization", f"Bearer {args.token}")
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         res = json.loads(resp.read().decode("utf-8"))
@@ -573,9 +664,10 @@ def main():
 
         console_parser = build_console_parser()
 
-        print(f"live console for turtle {args.id} -- type a command and press enter to "
-              "send it (type `help` to list shortcuts like `goto x y z --dig`; anything "
-              "else is sent as raw Lua); ctrl-d or ctrl-c to stop")
+        print(f"live console for controller {args.controller} -- type a command and press "
+              "enter to send it (type `help` to list shortcuts like `goto <turtle> x y z "
+              "--dig`; anything else is sent as raw Lua, run on the controller); ctrl-d or "
+              "ctrl-c to stop")
         try:
             while True:
                 try:
@@ -601,13 +693,18 @@ def main():
                     except ConsoleArgError as e:
                         print(f"[{e}]", file=sys.stderr)
                         continue
-                    description, command = build_shortcut(ns.cmd, ns)
+                    description, inner = build_shortcut(ns.cmd, ns)
+                    if ns.cmd in TURTLE_SHORTCUTS:
+                        command = proxy_wrap(ns.turtle, inner)
+                        description = f"{description} (turtle {ns.turtle})"
+                    else:
+                        command = inner
                 else:
                     description, command = None, line
 
                 try:
                     req = urllib.request.Request(
-                        f"{url}/cmd?id={args.id}",
+                        f"{url}/cmd?id={args.controller}",
                         data=json.dumps({"command": command}).encode("utf-8"),
                         method="POST",
                     )
@@ -626,7 +723,12 @@ def main():
         finally:
             stop.set()
 
-    elif args.cmd in SHORTCUT_NAMES:
+    elif args.cmd in TURTLE_SHORTCUTS:
+        description, inner = build_shortcut(args.cmd, args)
+        command = proxy_wrap(args.turtle, inner)
+        queue(url, args, f"{description} (turtle {args.turtle})", command)
+
+    elif args.cmd in CONTROLLER_SHORTCUTS:
         description, command = build_shortcut(args.cmd, args)
         queue(url, args, description, command)
 
