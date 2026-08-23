@@ -787,7 +787,18 @@ function M.run(params, shouldStop)
         fuelLevel = turtle.getFuelLevel()
         if fuelLevel ~= "unlimited" and fuelLevel < minFuel then
           print(("vertical: stopping -- fuel %s below minimum %d"):format(tostring(fuelLevel), minFuel))
-          return false, "insufficient fuel"
+          -- keepCheckpoint = true (3rd return value, see lib/job.lua's
+          -- M.run()): unlike every other stop reason here, this one is
+          -- worth resuming from exactly where it left off once refueled
+          -- -- dom-main/controller/scheduler.lua's fuel-rescue flow does
+          -- exactly that (lib/job.lua's M.resumeOrRequest()) rather than
+          -- walking back to the cell's origin and re-digging from
+          -- scratch. The checkpoint already on disk (from the last
+          -- completed stepDown+leg cycle, whenever that was) is still
+          -- perfectly valid here -- this fuel check runs before that
+          -- cycle's own work even starts, so nothing since then needs
+          -- to be captured fresh.
+          return false, "insufficient fuel", true
         end
       end
 

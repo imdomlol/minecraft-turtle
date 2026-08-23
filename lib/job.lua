@@ -24,10 +24,15 @@
   just coming back up idle. M.run()'s loop clears that file right after
   every job function returns, for *any* reason -- natural completion, an
   operator's stop, a version-triggered stop (lib/updater.lua), or a
-  crash pcall caught. That one line is what makes "only resume genuinely
-  unplanned interruptions" fall out for free: the only way a checkpoint
-  survives to the next boot is the whole computer stopping before that
-  line ever gets to run.
+  crash pcall caught -- UNLESS the job function's third return value is
+  truthy ("keepCheckpoint"), a deliberate, opt-in exception for a
+  graceful stop that's still worth resuming from exactly where it left
+  off (see dom-main/mining/vertical.lua's "insufficient fuel" path, the
+  only current user of this). Every other stop reason leaves that third
+  value nil/false, so "only resume genuinely unplanned interruptions (or
+  the few explicitly-marked resumable stops)" still holds -- an ordinary
+  crash pcall catch also leaves it nil/false, since pcall only ever
+  returns two values on failure.
 ------------------------------------------------------------------------]]
 
 if _G.__JOB_MODULE then return _G.__JOB_MODULE end
@@ -60,6 +65,29 @@ end
 
 function M.stop()
   M.request("idle")
+end
+
+-- Resumes `name` from its last checkpoint if one exists and actually
+-- belongs to it, otherwise starts fresh with fallbackParams. Lets a
+-- caller say "continue where this turtle left off if possible" without
+-- needing to know whether a checkpoint exists at all -- used by
+-- dom-main/controller/scheduler.lua when reassigning an idle turtle to
+-- its own (sticky) worksite cell, so a turtle that stopped for a
+-- resumable reason (see M.checkpoint()'s header comment -- currently
+-- just dom-main/mining/vertical.lua's "insufficient fuel" path) picks up
+-- exactly where it was instead of walking all the way back to the
+-- cell's origin and re-digging from scratch. Returns true if it resumed,
+-- false if it started fresh with fallbackParams instead.
+function M.resumeOrRequest(name, fallbackParams)
+  local saved = M.loadCheckpoint()
+  if saved and saved.name == name and M.hasJob(name) then
+    local params = saved.params or {}
+    params.__resume = saved.checkpoint
+    M.request(name, params)
+    return true
+  end
+  M.request(name, fallbackParams)
+  return false
 end
 
 -- True if `name` is a registered job (or "idle", always valid) -- lets
@@ -146,11 +174,13 @@ function M.run()
       sleep(1)
     else
       local fn = jobs[current.name]
-      local ok, err = pcall(fn, current.params, shouldStop)
+      local ok, err, keepCheckpoint = pcall(fn, current.params, shouldStop)
       if not ok then
         print("job: " .. current.name .. " crashed -- " .. tostring(err))
       end
-      M.clearCheckpoint()
+      if not keepCheckpoint then
+        M.clearCheckpoint()
+      end
       if not pending then
         current = { name = "idle", params = {} }
       end

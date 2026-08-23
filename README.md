@@ -470,6 +470,16 @@ same tick — `pairs()` iteration order isn't guaranteed, and without this
 a turtle could otherwise be handed two conflicting orders (its own work,
 and a rescue trip) in the same pass.
 
+Every reassignment — after a rescue, or just an idle turtle being handed
+its cell again — checks for a resumable checkpoint first
+(`lib/job.lua`'s `M.loadCheckpoint()`) and resumes exactly there if one
+exists, instead of walking back to the cell's origin and re-digging
+already-open ground: `dom-main/mining/vertical.lua`'s "insufficient
+fuel" stop is the one graceful stop marked resumable (its 3rd return
+value, `keepCheckpoint` — see `lib/job.lua`'s `M.run()`) specifically so
+this works. No travel at all happens on a resume; the fresh-start path
+(no checkpoint) is the only one that goes to the cell's origin first.
+
 ## lib/fuel.lua
 
 Keeps a turtle from silently failing to move for lack of fuel. CC:Tweaked
@@ -748,14 +758,28 @@ chunk unload, power loss) via `M.checkpoint(data)`, persisted to
 `M.run()`'s loop clears that file right after *every* job function
 return, for any reason — natural completion, an operator's `stop`, a
 version-triggered `stop` (`lib/updater.lua`), or a crashed `pcall` all
-go through that one line. The only way a checkpoint survives to the next
-boot is the whole computer stopping before that line ever runs — which
-is exactly what `dom-main/turtle_main.lua` checks for at startup, calling
-`M.request()` again with the saved checkpoint attached
-(`params.__resume`) if one's found. `dom-main/mining/vertical.lua` is
-the only job that currently uses this — see its own header comment for
-why a fairly coarse checkpoint granularity (once per stepDown+leg cycle,
-not mid-leg) is enough for a genuinely safe resume.
+go through that one line — *unless* the job function's third return
+value is truthy (`keepCheckpoint`), a deliberate, opt-in exception for a
+graceful stop that's still worth resuming from exactly where it left
+off: `dom-main/mining/vertical.lua`'s "insufficient fuel" stop is the
+only current user, so `dom-main/controller/scheduler.lua`'s fuel-rescue
+flow can put a refueled turtle straight back to work without it walking
+back to its cell's origin and re-digging already-open ground first.
+Every other stop reason leaves that third value nil, so "only resume
+genuinely unplanned interruptions (or the few explicitly-marked
+resumable stops)" still holds. `M.resumeOrRequest(name, fallbackParams)`
+wraps the common "resume this if there's a matching checkpoint, else
+start fresh" check into one call.
+
+The only way a checkpoint survives *without* being explicitly marked
+resumable is the whole computer stopping before `M.run()`'s clearing
+line ever runs — which is exactly what `dom-main/turtle_main.lua` checks
+for at startup, calling `M.request()` again with the saved checkpoint
+attached (`params.__resume`) if one's found. `dom-main/mining/
+vertical.lua` is the only job that currently uses any of this — see its
+own header comment for why a fairly coarse checkpoint granularity (once
+per stepDown+leg cycle, not mid-leg) is enough for a genuinely safe
+resume.
 
 A built-in `"goto"` job is always registered, no setup needed — it exists
 so an ad-hoc long trip doesn't have to block the console the way running

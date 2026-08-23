@@ -101,25 +101,44 @@ function M.pickRescuer(snapshot, strandedName, exclude)
 end
 
 -- Claims (or reuses) this turtle's worksite cell, and dispatches it
--- there to start mining. Returns true, output on success, or false,
--- reason (no worksite configured, every cell taken, couldn't reach the
--- cell, etc).
+-- there to start mining -- unless it already has a resumable checkpoint
+-- for mine_vertical (see lib/job.lua's M.checkpoint()/M.resumeOrRequest()
+-- and dom-main/mining/vertical.lua's "insufficient fuel" path, currently
+-- the only way one gets left behind), in which case it resumes exactly
+-- where it left off instead: no reason to walk back to the cell's
+-- origin and re-dig already-open ground just because a stop happened to
+-- be a fuel-rescue rather than a crash. This applies uniformly to every
+-- idle-turtle dispatch, not just a just-rescued turtle -- a rescuer
+-- turtle that itself has unfinished business in its own cell (it was
+-- only ever picked from turtles already idle, so it's not being pulled
+-- off active work, but it could have its own leftover checkpoint from
+-- some earlier stop) gets exactly the same treatment the next time it's
+-- assigned. Returns true, output on success, or false, reason (no
+-- worksite configured, every cell taken, couldn't reach the cell, etc).
 function M.assignWork(name)
   local cell, cellErr = worksite.assignCell(name)
   if not cell then
     return false, cellErr
   end
 
-  local job = worksite.jobFor(cell)
+  local jobSpec = worksite.jobFor(cell)
   local chest = worksite.chest()
-  if chest then job.params.chestPos = chest end
+  if chest then jobSpec.params.chestPos = chest end
 
   local command = string.format(
-    'local pathfind = dofile("/lib/pathfind.lua"); '
+    'local job = dofile("/lib/job.lua"); '
+      .. 'local saved = job.loadCheckpoint(); '
+      .. 'if saved and saved.name == "mine_vertical" and job.hasJob("mine_vertical") then '
+      .. '  local params = saved.params or {}; '
+      .. '  params.__resume = saved.checkpoint; '
+      .. '  job.request("mine_vertical", params); '
+      .. '  return true, "resumed from checkpoint"; '
+      .. 'end; '
+      .. 'local pathfind = dofile("/lib/pathfind.lua"); '
       .. 'local reached, info = pathfind.goto(%d, %d, %d, { tolerance = 0, allowDig = "safe" }); '
-      .. 'if reached then dofile("/lib/job.lua").request("mine_vertical", %s) end; '
+      .. 'if reached then job.request("mine_vertical", %s) end; '
       .. 'return reached, (info and info.reason)',
-    job.origin.x, job.origin.y, job.origin.z, luaLiteral(job.params)
+    jobSpec.origin.x, jobSpec.origin.y, jobSpec.origin.z, luaLiteral(jobSpec.params)
   )
 
   local ok, output = roster.proxy(name, command, DISPATCH_TIMEOUT)
@@ -127,7 +146,7 @@ function M.assignWork(name)
     print("scheduler: could not get " .. name .. " to its cell: " .. tostring(output))
     return false, output
   end
-  print("scheduler: " .. name .. " assigned and mining its cell")
+  print("scheduler: " .. name .. " mining its cell (" .. tostring(output) .. ")")
   return true, output
 end
 
