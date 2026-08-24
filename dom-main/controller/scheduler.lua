@@ -16,15 +16,12 @@
       mine_vertical there with the worksite's known chest wired in as
       chestPos.
 
-  A rescued turtle currently restarts its cell from the beginning rather
-  than resuming its exact mid-pass position -- mine_vertical's own
-  "insufficient fuel" stop is a graceful return, which lib/job.lua
-  deliberately clears the checkpoint for (same as any other graceful
-  stop), so there's nothing finer-grained left to resume from without
-  changing that clearing behavior. Always safe (no overlap, since it's
-  the same cell either way; already-dug ground costs nothing extra to
-  walk back through) -- just not maximally efficient. A reasonable
-  trade-off, not an oversight.
+  A rescued turtle resumes from its checkpointed mid-pass position rather
+  than restarting its cell from the beginning -- see assignWork()'s own
+  checkpoint-resume branch. Every dispatch (rescue or ordinary work
+  assignment) also requires a real, GPS-anchored position (see
+  hasKnownPosition()) -- a turtle whose position is unanchored gets left
+  alone rather than sent an absolute-coordinate command aimed at nowhere.
 
   Every dispatch (goto + start mining, or a rescue trip) is a single
   blocking dom-main/controller/roster.lua M.proxy() call -- this only
@@ -81,16 +78,33 @@ function M.isStranded(entry)
   return type(entry.fuel) == "number" and entry.fuel < STRANDED_FUEL_THRESHOLD
 end
 
+-- False for a turtle whose reported position isn't anchored to the real
+-- world -- lib/nav.lua's own boot default (no persisted position, no GPS
+-- fix) is source="relative", an arbitrary local (0,0,0) with no
+-- relationship to actual world coordinates. Dispatching ANY absolute-
+-- coordinate command (a rescue target, a goto, a cell origin) built from
+-- or aimed at an entry like that sends a turtle to nowhere -- confirmed
+-- live: a stranded turtle stuck at a fictional (0,0,0) got "rescued" by
+-- sending a perfectly good turtle to pathfind.goto(0, 0, 0), hundreds of
+-- blocks outside the working area. Every dispatch below (rescue target,
+-- rescuer choice, and ordinary work assignment) must check this first;
+-- an unanchored turtle needs an operator's `setpos` before autopilot can
+-- touch it at all.
+function M.hasKnownPosition(entry)
+  return entry.position ~= nil and entry.position.gpsFixed == true
+end
+
 -- The best rescuer for `strandedName`: idle, not itself stranded, not in
 -- `exclude` (every turtle already given an order elsewhere this same
--- tick -- see M.tick()), with the most spare fuel items (at least
--- RESCUE_MIN_FUEL_ITEMS -- not worth sending a turtle empty-handed). nil
--- if nobody qualifies.
+-- tick -- see M.tick()), with a real position (see M.hasKnownPosition --
+-- an unanchored rescuer can't reliably pathfind to anything either), with
+-- the most spare fuel items (at least RESCUE_MIN_FUEL_ITEMS -- not worth
+-- sending a turtle empty-handed). nil if nobody qualifies.
 function M.pickRescuer(snapshot, strandedName, exclude)
   local best, bestItems = nil, RESCUE_MIN_FUEL_ITEMS - 1
   for name, entry in pairs(snapshot) do
     if name ~= strandedName and not (exclude and exclude[name])
-        and M.isIdle(entry) and not M.isStranded(entry) then
+        and M.isIdle(entry) and not M.isStranded(entry) and M.hasKnownPosition(entry) then
       local items = entry.fuelItems or 0
       if items > bestItems then
         best, bestItems = name, items
@@ -230,11 +244,15 @@ function M.tick()
   for _, name in ipairs(names) do
     local entry = snapshot[name]
     if entry and M.isStranded(entry) then
-      local rescuerName = M.pickRescuer(snapshot, name, dispatched)
       dispatched[name] = true
-      if rescuerName then
-        dispatched[rescuerName] = true
-        rescues[#rescues + 1] = { name, entry, rescuerName }
+      if not M.hasKnownPosition(entry) then
+        print("scheduler: " .. name .. " is stranded but has no reliable position -- needs a manual `setpos` before it can be rescued")
+      else
+        local rescuerName = M.pickRescuer(snapshot, name, dispatched)
+        if rescuerName then
+          dispatched[rescuerName] = true
+          rescues[#rescues + 1] = { name, entry, rescuerName }
+        end
       end
     end
   end
@@ -245,7 +263,11 @@ function M.tick()
   for _, name in ipairs(names) do
     local entry = snapshot[name]
     if entry and not dispatched[name] and M.isIdle(entry) then
-      M.assignWork(name)
+      if not M.hasKnownPosition(entry) then
+        print("scheduler: " .. name .. " is idle but has no reliable position -- needs a manual `setpos` before autopilot will dispatch it")
+      else
+        M.assignWork(name)
+      end
     end
   end
 end
