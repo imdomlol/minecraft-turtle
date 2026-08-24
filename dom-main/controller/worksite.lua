@@ -37,6 +37,14 @@ local COLUMN_STEP = 3
 -- Kept clear at a cell's far edge so floating-point cell-boundary
 -- rounding can never push a leg one block into the next cell over.
 local LENGTH_MARGIN = 1
+-- A cell narrower than this in either dimension isn't a sensible
+-- independent mining lane anyway, and M.jobFor()'s minimum-1 clamp on
+-- length/width (a job needs to dig *something*) can no longer guarantee
+-- staying inside a cell this small -- see M.set()'s own validation
+-- against this, which is the real fix; M.jobFor()'s clamp below is
+-- defense in depth for a cell that somehow gets through anyway (a
+-- hand-edited state file, say), not the primary guard.
+local MIN_CELL_SIZE = 4
 
 local M = {}
 
@@ -90,14 +98,35 @@ end
 -- order works). y: height to start mining passes from. chestX/Y/Z:
 -- where a full turtle should go to unload. capacity: how many cells to
 -- divide the site into.
+--
+-- Refuses (returns nil, reason -- doesn't change the current worksite)
+-- a capacity that would produce any cell narrower than MIN_CELL_SIZE in
+-- either dimension: M.jobFor()'s minimum-1 length/width clamp (a job has
+-- to dig *something*) can push a job's reach a full block past a cell
+-- that small, into the neighbor's territory or past the site's own
+-- outer edge -- confirmed by testing (capacity=3000 over a 79x79 area
+-- put more than half the cells' jobs outside their own bounds; some
+-- capacities put *every* cell outside). Checking every cell rather than
+-- just the nominal cellW/cellD, since the last row/column can come out
+-- smaller than the rest (see buildCells()'s own maxX/maxZ clamp).
 function M.set(minX, minZ, maxX, maxZ, y, chestX, chestY, chestZ, capacity)
   local loX, hiX = math.min(minX, maxX), math.max(minX, maxX)
   local loZ, hiZ = math.min(minZ, maxZ), math.max(minZ, maxZ)
+
+  local cells = buildCells(loX, hiX, loZ, hiZ, capacity)
+  for _, cell in ipairs(cells) do
+    local w, d = cell.maxX - cell.minX, cell.maxZ - cell.minZ
+    if w < MIN_CELL_SIZE or d < MIN_CELL_SIZE then
+      return nil, ("capacity %d is too high for a %gx%g area -- cells would be as small as %.1fx%.1f blocks "
+        .. "(minimum %d); try a lower capacity"):format(capacity, hiX - loX, hiZ - loZ, w, d, MIN_CELL_SIZE)
+    end
+  end
+
   site = {
     minX = loX, maxX = hiX, minZ = loZ, maxZ = hiZ, y = y,
     chest = { x = chestX, y = chestY, z = chestZ },
     capacity = capacity,
-    cells = buildCells(loX, hiX, loZ, hiZ, capacity),
+    cells = cells,
     assignments = {}, -- turtle name -> cell index (0-based)
   }
   save()
@@ -167,8 +196,17 @@ function M.jobFor(cell)
   local innerMaxX = math.floor(cell.maxX)
   local innerMaxZ = math.floor(cell.maxZ)
 
-  local length = math.max(1, (innerMaxX - originX) - LENGTH_MARGIN)
-  local width = math.max(1, math.floor((innerMaxZ - originZ) / COLUMN_STEP))
+  -- Clamped to a minimum of 0, not 1: M.set() already refuses any cell
+  -- small enough for this to matter in practice (see MIN_CELL_SIZE), so
+  -- this is a defense-in-depth floor, not the primary guard -- and 0 is
+  -- the *safe* floor. dom-main/mining/vertical.lua's digColumn() handles
+  -- length=0 (an immediate "blocked" leg, no horizontal movement at all)
+  -- and width=0 (one pass at the origin, then the width cap stops it)
+  -- both without ever stepping outside the cell; clamping to 1 instead,
+  -- like this used to, is exactly what could push a too-small cell's job
+  -- a full block past its own edge.
+  local length = math.max(0, (innerMaxX - originX) - LENGTH_MARGIN)
+  local width = math.max(0, math.floor((innerMaxZ - originZ) / COLUMN_STEP))
   return {
     origin = { x = originX, y = site.y, z = originZ },
     params = {
