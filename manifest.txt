@@ -28,6 +28,7 @@ dom-main/controller/mode.lua
 dom-main/controller/version.lua
 dom-main/controller/worksite.lua
 dom-main/controller/scheduler.lua
+dom-main/controller/router.lua
 
 # --- shared libraries ---------------------------------------------------
 lib/exec.lua
@@ -36,9 +37,11 @@ lib/updater.lua
 lib/fuel.lua
 lib/nav.lua
 lib/pathfind.lua
+lib/routing.lua
 lib/job.lua
 lib/home.lua
 lib/chestfinder.lua
+lib/rescue.lua
 lib/inventory.lua
 lib/identity.lua
 lib/champions.lua
