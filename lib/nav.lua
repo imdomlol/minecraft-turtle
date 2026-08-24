@@ -99,6 +99,32 @@ function M.setPosition(x, y, z, facing)
   save()
 end
 
+-- init() only ever calls gps.locate() the very first time a turtle's
+-- /state/nav.state doesn't exist yet -- once ANY position is persisted
+-- (including a manual one from M.setPosition(), which is how this
+-- whole fleet's positions have been set so far), init() loads it
+-- straight from disk and never tries GPS again on its own. This is the
+-- explicit opt-in for upgrading an already-tracked turtle onto a real
+-- GPS network once one exists (dom-main/controller/gpshost.lua, or any
+-- dedicated anchor computers) -- e.g. via a fleet-wide operator command
+-- -- without needing to delete its state and gamble on GPS succeeding
+-- before it moves again. Heading is left untouched either way (GPS has
+-- no way to sense facing -- see M.getPosition()'s own comment).
+-- Returns true, position on success (state updated, persisted), or
+-- false, reason on failure (state left completely untouched -- whatever
+-- was tracked before, GPS-fixed or not, stays exactly as it was).
+function M.reacquireGPS()
+  init()
+  local x, y, z = gps.locate(GPS_TIMEOUT)
+  if not x then
+    return false, "no GPS fix (no anchor network reachable, or fewer than 4 in range)"
+  end
+  state.x, state.y, state.z = x, y, z
+  state.source = "gps"
+  save()
+  return true, { x = x, y = y, z = z }
+end
+
 -- Position/heading only, no block inspection. Heading is always dead-
 -- reckoned -- nothing (GPS included) senses facing direction.
 function M.getPosition()

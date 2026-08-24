@@ -35,6 +35,8 @@ Usage:
                          local JSON file (default: world_export.json), for an external viewer
   turtlectl.py worldwatch <controller> [jsonfile]  -- live-tail newly-observed blocks: NDJSON
                          on stdout (pipe to your own script), keeps jsonfile patched in place
+  turtlectl.py gpshost <controller> [x y z]  -- get (no args) or set this controller's own GPS
+                         anchor position -- see dom-main/controller/gpshost.lua
 
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
@@ -52,6 +54,8 @@ named turtle:
   turtlectl.py jobstatus <controller> <turtle>
   turtlectl.py pos <controller> <turtle> [--full]                 -- --full spins to see all 6 surrounding blocks
   turtlectl.py setpos <controller> <turtle> <x> <y> <z> <facing>  -- manual calibration (facing: 0-3 or compass name)
+  turtlectl.py gpsfix <controller> <turtle>            -- try to acquire a real GPS fix (needs a GPS
+                         network -- see the gpshost shortcut above)
   turtlectl.py turnleft <controller> <turtle>
   turtlectl.py turnright <controller> <turtle>
   turtlectl.py inv <controller> <turtle>
@@ -410,6 +414,14 @@ def build_shortcut(cmd, ns):
         )
         return f"set position to ({ns.x}, {ns.y}, {ns.z}) facing {ns.facing}", command
 
+    if cmd == "gpsfix":
+        command = (
+            'local ok, result = dofile("/lib/nav.lua").reacquireGPS(); '
+            'if not ok then return false, result end; '
+            'return true, dofile("/lib/nav.lua").report()'
+        )
+        return "acquire a real GPS fix", command
+
     if cmd == "inv":
         return "inventory report", 'return dofile("/lib/inventory.lua").report()'
 
@@ -490,14 +502,23 @@ def build_shortcut(cmd, ns):
                         f"chest=({ns.chestX},{ns.chestY},{ns.chestZ}) capacity={ns.capacity}")
         return description, command
 
+    if cmd == "gpshost":
+        if ns.x is not None and ns.y is not None and ns.z is not None:
+            command = f'return dofile("/dom-main/controller/gpshost.lua").set({ns.x}, {ns.y}, {ns.z})'
+            return f"set this controller's GPS anchor position to ({ns.x}, {ns.y}, {ns.z})", command
+        if ns.x is not None or ns.y is not None or ns.z is not None:
+            print("error: gpshost needs all of x y z, or none of them (to just view it)", file=sys.stderr)
+            sys.exit(1)
+        return "current GPS anchor position", 'return dofile("/dom-main/controller/gpshost.lua").get()'
+
     raise ValueError(f"unknown shortcut: {cmd}")
 
 
 TURTLE_SHORTCUTS = {
-    "goto", "mine", "stop", "jobstatus", "pos", "setpos", "turnleft", "turnright",
+    "goto", "mine", "stop", "jobstatus", "pos", "setpos", "gpsfix", "turnleft", "turnright",
     "inv", "home", "markhome", "findchest", "dump",
 }
-CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode", "version", "worksite"}
+CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode", "version", "worksite", "gpshost"}
 # whoami is the one shortcut where <turtle> is optional -- see its
 # build_shortcut() branch and the unified dispatch below, which proxies
 # to a turtle whenever one was given rather than checking set membership.
@@ -569,6 +590,9 @@ def build_console_parser():
     spc.add_argument("z", type=int)
     spc.add_argument("facing")
 
+    gfp = sub.add_parser("gpsfix", add_help=False)
+    gfp.add_argument("turtle")
+
     tlp = sub.add_parser("turnleft", add_help=False)
     tlp.add_argument("turtle")
 
@@ -620,6 +644,11 @@ def build_console_parser():
     for name in ("minX", "minZ", "maxX", "maxZ", "y", "chestX", "chestY", "chestZ", "capacity"):
         wsp.add_argument(name, nargs="?", type=int)
 
+    ghp = sub.add_parser("gpshost", add_help=False)
+    ghp.add_argument("x", nargs="?", type=int)
+    ghp.add_argument("y", nargs="?", type=int)
+    ghp.add_argument("z", nargs="?", type=int)
+
     return p
 
 
@@ -635,6 +664,7 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   jobstatus <turtle>                           what job is running / queued
   pos <turtle> [--full]                        report position and surroundings (--full spins to see all 6 sides)
   setpos <turtle> <x> <y> <z> <facing>         manually calibrate position/heading (0-3 or compass name)
+  gpsfix <turtle>                              try to acquire a real GPS fix (needs a GPS network -- see gpshost)
   turnleft <turtle>                            turn left 90 degrees
   turnright <turtle>                           turn right 90 degrees
   inv <turtle>                                 report inventory contents
@@ -650,6 +680,7 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   version [N] [--bump]                         get or set the controller's manually-tracked code version
   worksite [minX minZ maxX maxZ y chestX chestY chestZ capacity]
                                                 get (no args) or set the current mining worksite
+  gpshost [x y z]                              get (no args) or set this controller's own GPS anchor position
   help                                         show this list
 
 mode governs the (not yet built) autopilot scheduler, not manual commands
@@ -810,6 +841,14 @@ def main():
     wsp.add_argument("capacity", nargs="?", type=int,
                       help="How many non-overlapping cells to divide the site into (one per turtle).")
 
+    ghp = sub.add_parser("gpshost", parents=[waitp],
+                          help="Get or set this controller's own GPS anchor position "
+                               "(it doubles as one of the >=4 GPS anchors alongside its other duties).")
+    ghp.add_argument("controller")
+    ghp.add_argument("x", nargs="?", type=int, help="Omit all of x/y/z to just view the current position.")
+    ghp.add_argument("y", nargs="?", type=int)
+    ghp.add_argument("z", nargs="?", type=int)
+
     gp = sub.add_parser("goto", parents=[waitp], help="Move to (x, y, z) as a background job.")
     gp.add_argument("controller")
     gp.add_argument("turtle")
@@ -874,6 +913,11 @@ def main():
     spp.add_argument("y", type=int)
     spp.add_argument("z", type=int)
     spp.add_argument("facing", help="Heading 0-3, or a compass name (north/east/south/west).")
+
+    gfp = sub.add_parser("gpsfix", parents=[waitp],
+                          help="Try to acquire a real GPS fix (needs a GPS network -- see the gpshost shortcut).")
+    gfp.add_argument("controller")
+    gfp.add_argument("turtle")
 
     tlp = sub.add_parser("turnleft", parents=[waitp], help="Turn left 90 degrees.")
     tlp.add_argument("controller")
