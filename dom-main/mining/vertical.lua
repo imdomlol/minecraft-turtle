@@ -728,10 +728,15 @@ end
 -- own top is just tracked locally, since home.lua only remembers one
 -- position and every width position needs its own.
 --
--- params.__resume (set by dom-main/turtle_main.lua's boot-time recovery,
--- from a checkpoint dom-main/controller/roster.lua and lib/job.lua's own
--- machinery preserved across an unplanned interruption -- crash, chunk
--- unload, power loss) picks the loop back up at the exact width
+-- params.__resume (set by dom-main/turtle_main.lua's boot-time recovery
+-- OR by dom-main/controller/scheduler.lua reassigning a turtle its own
+-- cell -- see M.assignWork()/lib/job.lua's M.resumeOrRequest() -- from a
+-- checkpoint lib/job.lua's own machinery preserved across EITHER an
+-- unplanned interruption (crash, chunk unload, power loss) or a
+-- deliberate shouldStop()-triggered one (an operator's stop, or a
+-- scheduler-paused fuel rescue -- see lib/rescue.lua -- both now
+-- keepCheckpoint = true just like the insufficient-fuel path below
+-- always was) picks the loop back up at the exact width
 -- position/direction/depth it left off at, instead of starting over from
 -- widthIndex 1. Every full stepDown+leg+turn cycle checkpoints via
 -- job.checkpoint() (see digColumn's onProgress above) -- deliberately
@@ -942,7 +947,16 @@ function M.run(params, shouldStop)
 
     if interrupted then
       print("vertical: interrupted, stopped at width position " .. widthIndex .. "'s start")
-      return true, { width = widthIndex, position = nav.getPosition() }
+      -- keepCheckpoint = true: same reasoning as the "insufficient fuel"
+      -- path above -- digColumn's onProgress already checkpointed at the
+      -- last completed stepDown+leg+turn cycle boundary, so whatever
+      -- requested this stop (an operator, or now
+      -- dom-main/controller/scheduler.lua pausing this turtle to send it
+      -- on a fuel rescue -- see lib/rescue.lua) can resume it exactly
+      -- where it left off via lib/job.lua's M.resumeOrRequest(), the
+      -- same as dom-main/controller/scheduler.lua's M.assignWork()
+      -- already does for every idle-turtle dispatch.
+      return true, { width = widthIndex, position = nav.getPosition() }, true
     end
 
     if widthCap and widthIndex >= widthCap then
@@ -968,7 +982,9 @@ function M.run(params, shouldStop)
     if not reached then
       if info.reason == "interrupted" then
         print("vertical: interrupted while moving to the next width position")
-        return true, { width = widthIndex, position = nav.getPosition() }
+        -- keepCheckpoint = true -- see the identical interrupted-stop
+        -- comment a bit above.
+        return true, { width = widthIndex, position = nav.getPosition() }, true
       end
       print("vertical: could not reach next width position -- " .. tostring(info.reason))
       return false, "could not reach next width position: " .. tostring(info.reason)
@@ -978,7 +994,9 @@ function M.run(params, shouldStop)
   end
 
   print("vertical: interrupted before starting a new width position")
-  return true, { width = widthIndex, position = nav.getPosition() }
+  -- keepCheckpoint = true -- see the identical interrupted-stop comment
+  -- above.
+  return true, { width = widthIndex, position = nav.getPosition() }, true
 end
 
 return M

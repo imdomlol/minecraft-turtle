@@ -5,12 +5,13 @@
 
   Every tick, for each turtle currently in the roster:
     - stranded (M.isStranded() -- can't reach the worksite's known
-      chest under its own power at all) -> attemptRescue(): find an
-      idle turtle carrying spare fuel ITEMS (lib/fuel.lua's
-      M.spareFuelItems() -- distinct from fuel LEVEL, see there for
-      why), send it to stand next to the stranded one and hand over
-      half its spare fuel, then have the stranded turtle refuel and go
-      back to work.
+      chest under its own power at all) -> attemptRescue(): send the
+      closest-to-chest turtle that CAN reach the chest (lib/rescue.lua --
+      idle or currently mining, both equally eligible: either way it
+      routes through the chest first to fetch fuel, both for itself and
+      to hand over, rather than assuming it already has spare fuel on
+      hand) to pause whatever it's doing, fetch fuel, hand half over to
+      the stranded turtle, then resume its own paused work.
     - idle and needsSelfRefuel() (can reach the chest on its own, just
       not enough left to keep mining safely once there) -> M.dispatchToChest():
       send it to refuel itself, no second turtle needed, then back to
@@ -57,9 +58,12 @@ local TICK_INTERVAL           = 5   -- seconds between scheduler passes
 -- distance-based figures from (see both functions' own comments) --
 -- not the primary judgment call whenever that info is available.
 local STRANDED_FUEL_THRESHOLD = 20
-local RESCUE_MIN_FUEL_ITEMS   = 4   -- a rescuer needs at least this many spare fuel items to bother sending
 local DISPATCH_TIMEOUT        = 300 -- seconds -- generous: a fresh/idle turtle's origin could be far away
-local RESCUE_TIMEOUT          = 120
+-- Generous like DISPATCH_TIMEOUT above, not the old flat 120: lib/rescue.lua's
+-- trip now includes waiting (bounded, up to 30s) for a mining rescuer's
+-- job to actually pause, plus a stop at the chest before ever reaching
+-- the stranded turtle -- a longer round trip than the old direct-to-target dispatch.
+local RESCUE_TIMEOUT          = 300
 local REFUEL_TIMEOUT          = 30
 local REFUEL_TRIP_TIMEOUT     = 120
 
@@ -149,20 +153,34 @@ function M.hasKnownPosition(entry)
   return entry.position ~= nil and entry.position.gpsFixed == true
 end
 
--- The best rescuer for `strandedName`: idle, not itself stranded, not in
--- `exclude` (every turtle already given an order elsewhere this same
--- tick -- see M.tick()), with a real position (see M.hasKnownPosition --
--- an unanchored rescuer can't reliably pathfind to anything either), with
--- the most spare fuel items (at least RESCUE_MIN_FUEL_ITEMS -- not worth
--- sending a turtle empty-handed). nil if nobody qualifies.
+-- The best rescuer for `strandedName`: not itself stranded (it needs to
+-- be able to reach the chest under its own power to fetch fuel there --
+-- see M.attemptRescue()/lib/rescue.lua, which routes every rescue
+-- through the worksite's chest rather than assuming the rescuer already
+-- has spare fuel on hand), not in `exclude` (every turtle already given
+-- an order elsewhere this same tick -- see M.tick()), with a real
+-- position (M.hasKnownPosition -- an unanchored rescuer can't reliably
+-- pathfind to anything either). Idle and currently-mining turtles are
+-- deliberately equally eligible -- a mining candidate has its job paused
+-- and resumed automatically (lib/rescue.lua, lib/job.lua's
+-- M.resumeOrRequest()), and either way the rescuer is topping up at the
+-- chest anyway, so "already has fuel to spare" no longer matters for the
+-- choice. Ranked by whichever eligible candidate is closest to the
+-- chest -- the chest's position is fixed, so that's the only leg of the
+-- total trip that actually varies by which turtle gets picked. nil if
+-- nobody qualifies, or if there's no worksite chest configured at all
+-- (nowhere to send anyone to fetch fuel from).
 function M.pickRescuer(snapshot, strandedName, exclude)
-  local best, bestItems = nil, RESCUE_MIN_FUEL_ITEMS - 1
+  local chest = worksite.chest()
+  if not chest then return nil end
+
+  local best, bestCost = nil, nil
   for name, entry in pairs(snapshot) do
     if name ~= strandedName and not (exclude and exclude[name])
-        and M.isIdle(entry) and not M.isStranded(entry) and M.hasKnownPosition(entry) then
-      local items = entry.fuelItems or 0
-      if items > bestItems then
-        best, bestItems = name, items
+        and not M.isStranded(entry) and M.hasKnownPosition(entry) then
+      local cost = fuel.travelCost(entry.position, chest)
+      if not best or cost < bestCost then
+        best, bestCost = name, cost
       end
     end
   end
@@ -219,37 +237,19 @@ function M.assignWork(name)
   return true, output
 end
 
--- Sends `rescuerName` (already chosen -- see M.tick()) to stand next to
--- `strandedName` and hand over half its spare fuel items, then has the
+-- Sends `rescuerName` (already chosen -- see M.tick()/M.pickRescuer())
+-- to pause its own work (if any), fetch fuel at the worksite's chest,
+-- and hand half of what it's carrying to `strandedName` -- see
+-- lib/rescue.lua for the actual turtle-side sequence -- then has the
 -- stranded turtle refuel and reassigns it its own (same, sticky) cell.
 function M.attemptRescue(strandedName, strandedEntry, rescuerName)
   local pos = strandedEntry.position
-  print("scheduler: dispatching " .. rescuerName .. " to refuel stranded turtle " .. strandedName)
+  local chest = worksite.chest()
+  print("scheduler: dispatching " .. rescuerName .. " to fetch fuel and refuel stranded turtle " .. strandedName)
 
   local rescueCommand = string.format(
-    'local nav = dofile("/lib/nav.lua"); '
-      .. 'local pathfind = dofile("/lib/pathfind.lua"); '
-      .. 'local reached, info = pathfind.goto(%d, %d, %d, { tolerance = 1, allowDig = "safe" }); '
-      .. 'if not reached then return false, "could not reach stranded turtle: " .. tostring(info and info.reason) end; '
-      .. 'local facingStranded = false; '
-      .. 'for i = 1, 4 do '
-      .. '  local found, data = turtle.inspect(); '
-      .. '  if found and nav.isComputerCraftBlock(data.name) then facingStranded = true break end; '
-      .. '  nav.turnRight(); '
-      .. 'end; '
-      .. 'if not facingStranded then return false, "reached the area but no turtle is adjacent" end; '
-      .. 'local dropped = 0; '
-      .. 'for slot = 1, 16 do '
-      .. '  turtle.select(slot); '
-      .. '  local count = turtle.getItemCount(slot); '
-      .. '  if count > 0 and turtle.refuel(0) then '
-      .. '    local giveCount = math.floor(count / 2); '
-      .. '    if giveCount > 0 and turtle.drop(giveCount) then dropped = dropped + giveCount end '
-      .. '  end '
-      .. 'end; '
-      .. 'turtle.select(1); '
-      .. 'return true, "dropped " .. dropped .. " fuel item(s)"',
-    pos.x, pos.y, pos.z
+    'return dofile("/lib/rescue.lua").perform(%d, %d, %d, %d, %d, %d)',
+    pos.x, pos.y, pos.z, chest.x, chest.y, chest.z
   )
 
   local ok, output = roster.proxy(rescuerName, rescueCommand, RESCUE_TIMEOUT)
@@ -257,7 +257,7 @@ function M.attemptRescue(strandedName, strandedEntry, rescuerName)
     print("scheduler: rescue by " .. rescuerName .. " failed: " .. tostring(output))
     return false, output
   end
-  print("scheduler: " .. rescuerName .. " reached " .. strandedName .. " -- " .. tostring(output))
+  print("scheduler: " .. rescuerName .. " -- " .. tostring(output))
 
   -- Target dom-main/mining/vertical.lua's own dynamic minFuel floor
   -- (lib/fuel.lua's M.safeReturnFuel(), from the stranded turtle's
@@ -267,7 +267,6 @@ function M.attemptRescue(strandedName, strandedEntry, rescuerName)
   -- against the now-dynamic floor it would routinely leave the turtle
   -- still below what mine_vertical needs, hitting the identical
   -- "insufficient fuel" stop again the moment it resumed.
-  local chest = worksite.chest()
   local refuelTarget = chest and fuel.safeReturnFuel(pos, chest) or 1
   local refuelOk, refuelOutput = roster.proxy(strandedName,
     "return dofile(\"/lib/fuel.lua\").ensureFuel(" .. refuelTarget .. ")", REFUEL_TIMEOUT)
