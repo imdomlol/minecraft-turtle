@@ -19,7 +19,7 @@
 if _G.__RESCUE_MODULE then return _G.__RESCUE_MODULE end
 
 local nav = dofile("/lib/nav.lua")
-local pathfind = dofile("/lib/pathfind.lua")
+local routing = dofile("/lib/routing.lua")
 local job = dofile("/lib/job.lua")
 local fuel = dofile("/lib/fuel.lua")
 local chestfinder = dofile("/lib/chestfinder.lua")
@@ -227,7 +227,7 @@ function M.perform(strandedX, strandedY, strandedZ, chestX, chestY, chestZ)
     return false, "found fuel, but not enough to reach a safe fuel level at the chest"
   end
 
-  local reached, info = pathfind.goto(strandedX, strandedY, strandedZ, { tolerance = 1, allowDig = "safe" })
+  local reached, info = routing.goto(strandedX, strandedY, strandedZ, { tolerance = 1, allowDig = "safe" })
   if not reached then
     return false, "could not reach stranded turtle: " .. tostring(info and info.reason)
   end
@@ -238,7 +238,7 @@ function M.perform(strandedX, strandedY, strandedZ, chestX, chestY, chestZ)
 
   local dropped = giveHalfFuel(strandedDirection)
 
-  local backReached = pathfind.goto(pausedPos.x, pausedPos.y, pausedPos.z, { tolerance = 0, allowDig = "safe" })
+  local backReached = routing.goto(pausedPos.x, pausedPos.y, pausedPos.z, { tolerance = 0, allowDig = "safe" })
   if not backReached then
     return false, "delivered " .. dropped .. " fuel item(s), but could not get back to resume its own paused job"
   end

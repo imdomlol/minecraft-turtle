@@ -23,7 +23,7 @@
 if _G.__CHESTFINDER_MODULE then return _G.__CHESTFINDER_MODULE end
 
 local nav = dofile("/lib/nav.lua")
-local pathfind = dofile("/lib/pathfind.lua")
+local routing = dofile("/lib/routing.lua")
 local home = dofile("/lib/home.lua")
 local inventory = dofile("/lib/inventory.lua")
 
@@ -270,7 +270,7 @@ function M.find(opts)
   -- without the spiral even needing to run. The same fix already exists
   -- for the analogous case in dom-main/controller/scheduler.lua's rescue
   -- dispatch (reaching a stranded turtle -- also a solid, occupied cell).
-  local reached, info = pathfind.goto(target.x, target.y, target.z, { tolerance = 1, allowDig = "safe" })
+  local reached, info = routing.goto(target.x, target.y, target.z, { tolerance = 1, allowDig = "safe" })
   if not reached then
     return nil, "could not reach search center: " .. tostring(info.reason)
   end
@@ -279,7 +279,7 @@ function M.find(opts)
   local found, reason = spiralSearch(maxRadius, matchName, opts.exclude)
   if found then return found end
 
-  pathfind.goto(searchStart.x, searchStart.y, searchStart.z, { tolerance = 0, allowDig = false })
+  routing.goto(searchStart.x, searchStart.y, searchStart.z, { tolerance = 0, allowDig = false })
   return nil, reason
 end
 

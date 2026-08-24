@@ -152,8 +152,8 @@ end
 -- switching to a different job) now interrupts a "goto" job almost
 -- immediately, not just between steps of some coarser outer loop.
 M.register("goto", function(params, shouldStop)
-  local pathfind = dofile("/lib/pathfind.lua")
-  return pathfind.goto(params.x, params.y, params.z, {
+  local routing = dofile("/lib/routing.lua")
+  return routing.goto(params.x, params.y, params.z, {
     tolerance = params.tolerance,
     allowDig = params.allowDig,
     shouldStop = shouldStop,

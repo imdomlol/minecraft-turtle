@@ -71,6 +71,13 @@ local RESCUE_TIMEOUT          = 600
 local REFUEL_TIMEOUT          = 30
 local REFUEL_TRIP_TIMEOUT     = 120
 
+local MINE_DEFAULT_LENGTH              = 10
+local MINE_DEFAULT_OBSERVANT           = true
+local MINE_DEFAULT_THOROUGH            = true
+local MINE_DEFAULT_STEP_DOWN_OBSERVANT = 5
+local MINE_DEFAULT_STEP_DOWN_PLAIN     = 2
+local MINE_MAX_VEIN_BLOCKS             = 48
+
 local M = {}
 
 -- Serializes a plain Lua value (used for mine_vertical's params table)
@@ -97,6 +104,26 @@ end
 -- round trip.
 function M.isIdle(entry)
   return entry.job ~= nil and entry.job.current == "idle"
+end
+
+local function miningFuelBudget(entry)
+  local params = entry.job and entry.job.params or {}
+  local length = params.length or MINE_DEFAULT_LENGTH
+  local observant = params.observant
+  if observant == nil then observant = MINE_DEFAULT_OBSERVANT end
+  local thorough = params.thorough
+  if thorough == nil then thorough = MINE_DEFAULT_THOROUGH end
+  local stepDown = params.stepDown
+    or (observant and MINE_DEFAULT_STEP_DOWN_OBSERVANT or MINE_DEFAULT_STEP_DOWN_PLAIN)
+  return length + stepDown + (thorough and MINE_MAX_VEIN_BLOCKS or 0)
+end
+
+local function selfRefuelTarget(entry, chest)
+  return fuel.safeReturnFuel(entry.position, chest) + miningFuelBudget(entry)
+end
+
+local function hasInventoryFuel(entry)
+  return type(entry.fuelItems) == "number" and entry.fuelItems > 0
 end
 
 -- Genuinely can't reach the worksite's known chest under its own power
@@ -138,7 +165,7 @@ function M.needsSelfRefuel(entry)
   local chest = worksite.chest()
   if not chest or not M.hasKnownPosition(entry) then return false end
   if M.isStranded(entry) then return false end
-  return entry.fuel < fuel.safeReturnFuel(entry.position, chest)
+  return entry.fuel < selfRefuelTarget(entry, chest)
 end
 
 -- False for a turtle whose reported position isn't anchored to the real
@@ -225,8 +252,8 @@ function M.assignWork(name)
       .. '  job.request("mine_vertical", params); '
       .. '  return true, "resumed from checkpoint"; '
       .. 'end; '
-      .. 'local pathfind = dofile("/lib/pathfind.lua"); '
-      .. 'local reached, info = pathfind.goto(%d, %d, %d, { tolerance = 0, allowDig = "safe" }); '
+      .. 'local routing = dofile("/lib/routing.lua"); '
+      .. 'local reached, info = routing.goto(%d, %d, %d, { tolerance = 0, allowDig = "safe" }); '
       .. 'if reached then job.request("mine_vertical", %s) end; '
       .. 'return reached, (info and info.reason)',
     jobSpec.origin.x, jobSpec.origin.y, jobSpec.origin.z, luaLiteral(jobSpec.params)
@@ -271,9 +298,12 @@ function M.attemptRescue(strandedName, strandedEntry, rescuerName)
   -- against the now-dynamic floor it would routinely leave the turtle
   -- still below what mine_vertical needs, hitting the identical
   -- "insufficient fuel" stop again the moment it resumed.
-  local refuelTarget = chest and fuel.safeReturnFuel(pos, chest) or 1
+  local refuelTarget = chest and selfRefuelTarget(strandedEntry, chest) or 1
   local refuelOk, refuelOutput = roster.proxy(strandedName,
-    "return dofile(\"/lib/fuel.lua\").ensureFuel(" .. refuelTarget .. ")", REFUEL_TIMEOUT)
+    "local ok, reason = dofile(\"/lib/fuel.lua\").ensureFuel(" .. refuelTarget .. "); "
+      .. "if not ok then error(tostring(reason), 0) end; "
+      .. "return true, \"refueled to \" .. tostring(turtle.getFuelLevel())",
+    REFUEL_TIMEOUT)
   if not refuelOk then
     print("scheduler: " .. strandedName .. " still couldn't refuel after the rescue: " .. tostring(refuelOutput))
     return false, "refuel after rescue failed: " .. tostring(refuelOutput)
@@ -295,7 +325,7 @@ end
 -- up if there is one, same as a real rescue does).
 function M.dispatchToChest(name, entry)
   local chest = worksite.chest()
-  local target = fuel.safeReturnFuel(entry.position, chest)
+  local target = selfRefuelTarget(entry, chest)
   print("scheduler: sending " .. name .. " to the chest to refuel (enough to get there, not enough to keep mining safely)")
 
   local command = string.format(
@@ -303,7 +333,7 @@ function M.dispatchToChest(name, entry)
       .. 'local found, reason = chestfinder.find({ x = %d, y = %d, z = %d }); '
       .. 'if not found then return false, "could not reach the chest: " .. tostring(reason) end; '
       .. 'local ok, refuelReason = dofile("/lib/fuel.lua").ensureFuel(%d); '
-      .. 'if not ok then return false, "reached the chest but could not refuel: " .. tostring(refuelReason) end; '
+      .. 'if not ok then error("reached the chest but could not refuel: " .. tostring(refuelReason), 0) end; '
       .. 'return true, "refueled to " .. tostring(turtle.getFuelLevel())',
     chest.x, chest.y, chest.z, target
   )
@@ -314,6 +344,29 @@ function M.dispatchToChest(name, entry)
     return false, output
   end
   print("scheduler: " .. name .. " " .. tostring(output) .. " -- sending it back to its cell")
+  return M.assignWork(name)
+end
+
+-- Before dispatching a separate rescue turtle, let a stranded turtle
+-- burn fuel items it is already carrying. This covers the common
+-- handoff edge case where a rescuer successfully dropped coal into the
+-- stranded turtle, but the controller never reached the post-delivery
+-- refuel command because the rescuer later failed or timed out on its
+-- own return trip.
+function M.refuelFromInventory(name, entry)
+  local chest = worksite.chest()
+  local target = (chest and M.hasKnownPosition(entry)) and selfRefuelTarget(entry, chest) or 1
+  print("scheduler: " .. name .. " is stranded but has fuel items -- trying inventory refuel before rescue")
+  local ok, output = roster.proxy(name,
+    "local ok, reason = dofile(\"/lib/fuel.lua\").ensureFuel(" .. target .. "); "
+      .. "if not ok then error(tostring(reason), 0) end; "
+      .. "return true, \"refueled to \" .. tostring(turtle.getFuelLevel())",
+    REFUEL_TIMEOUT)
+  if not ok then
+    print("scheduler: " .. name .. " could not refuel from inventory: " .. tostring(output))
+    return false, output
+  end
+  print("scheduler: " .. name .. " refueled from inventory -- sending it back to its cell")
   return M.assignWork(name)
 end
 
@@ -387,6 +440,8 @@ function M.tick()
       dispatched[name] = true
       if not M.hasKnownPosition(entry) then
         print("scheduler: " .. name .. " is stranded but has no reliable position -- needs a manual `setpos` before it can be rescued")
+      elseif hasInventoryFuel(entry) then
+        tasks[#tasks + 1] = function() M.refuelFromInventory(name, entry) end
       else
         local rescuerName = M.pickRescuer(snapshot, name, dispatched)
         if rescuerName then

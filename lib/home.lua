@@ -13,7 +13,7 @@
 if _G.__HOME_MODULE then return _G.__HOME_MODULE end
 
 local nav = dofile("/lib/nav.lua")
-local pathfind = dofile("/lib/pathfind.lua")
+local routing = dofile("/lib/routing.lua")
 
 local STATE_PATH = "/state/home.state"
 
@@ -53,7 +53,7 @@ end
 function M.go(opts)
   local home = M.get()
   if not home then return false, "no home marked -- call home.mark() first" end
-  return pathfind.goto(home.x, home.y, home.z, opts)
+  return routing.goto(home.x, home.y, home.z, opts)
 end
 
 _G.__HOME_MODULE = M

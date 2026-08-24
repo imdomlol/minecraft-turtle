@@ -104,7 +104,7 @@
 ------------------------------------------------------------------------]]
 
 local nav = dofile("/lib/nav.lua")
-local pathfind = dofile("/lib/pathfind.lua")
+local routing = dofile("/lib/routing.lua")
 local home = dofile("/lib/home.lua")
 local inventory = dofile("/lib/inventory.lua")
 local chestfinder = dofile("/lib/chestfinder.lua")
@@ -228,6 +228,10 @@ end
 -- turn into an unbounded side quest.
 local MAX_VEIN_BLOCKS = 48
 
+local function miningCycleFuelBudget(length, stepDown, thorough)
+  return length + stepDown + (thorough and MAX_VEIN_BLOCKS or 0)
+end
+
 -- Starting from one or more already-spotted valuable neighbors (`seeds`,
 -- a list of { x, y, z, name } world positions, none yet mined), flood-
 -- fills outward through connected valuable blocks (BFS over each mined
@@ -274,7 +278,7 @@ local function mineVein(seeds, shouldStop, unreachableNames)
     local key = target.x .. "," .. target.y .. "," .. target.z
     if not visited[key] then
       visited[key] = true
-      local reached = pathfind.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = "safe" })
+      local reached = routing.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = "safe" })
       if reached then
         mined = mined + 1
         for _, delta in ipairs(NEIGHBOR_DELTAS) do
@@ -298,7 +302,7 @@ local function mineVein(seeds, shouldStop, unreachableNames)
     print(("vertical: chased a vein for %d block(s)"):format(mined))
   end
 
-  pathfind.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = "safe" })
+  routing.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = "safe" })
   nav.face(origin.heading)
 end
 
@@ -521,7 +525,7 @@ local function unloadIfFull(tidy, chestPos)
     print(("vertical: unloaded %d slot(s) total across %d chests"):format(totalEmptied, chestsUsed))
   end
 
-  local reached, info = pathfind.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = "safe" })
+  local reached, info = routing.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = "safe" })
   if not reached then
     return false, "could not return to (" .. origin.x .. "," .. origin.y .. "," .. origin.z
       .. ") after unloading: " .. tostring(info.reason)
@@ -661,13 +665,16 @@ end
 -- unloadIfFull() failed -- see digForward/tunnelForward above; the whole
 -- job needs to stop, not just this pass) -- and a third value carrying
 -- the fatal error string, only present when reason == "fatal".
-local function digColumn(length, stepDown, height, observant, thorough, tidy, chestPos, unreachableNames, shouldStop, startDepth, onProgress)
+local function digColumn(length, stepDown, height, observant, thorough, tidy, chestPos, unreachableNames, shouldStop, shouldRefuel, startDepth, onProgress)
   local legCount = 0
   local depth = startDepth or 0
 
   while true do
     if shouldStop and shouldStop() then
       return legCount, "interrupted"
+    end
+    if shouldRefuel and shouldRefuel() then
+      return legCount, "fuel"
     end
 
     local step = stepDown
@@ -715,7 +722,7 @@ local function returnToColumnStart(columnStart)
   local pos = nav.getPosition()
 
   while true do
-    local reached, info = pathfind.goto(columnStart.x, pos.y, columnStart.z, { tolerance = 0, allowDig = "safe" })
+    local reached, info = routing.goto(columnStart.x, pos.y, columnStart.z, { tolerance = 0, allowDig = "safe" })
     if reached then break end
 
     if pos.y >= columnStart.y then
@@ -790,30 +797,6 @@ function M.run(params, shouldStop)
   local observant   = optBool(params.observant, DEFAULTS.observant)
   local thorough    = optBool(params.thorough, DEFAULTS.thorough)
 
-  -- Recomputed at every fuel check below, not just once at the top:
-  -- the distance back to chestPos keeps growing as a pass digs deeper,
-  -- so the safe floor has to grow with it. lib/fuel.lua's
-  -- M.safeReturnFuel() (2x the direct fuel cost back to chestPos, by
-  -- its own default -- see there for why the multiplier lives in
-  -- exactly one place) is the actual floor whenever chestPos is known;
-  -- explicitMinFuel, if the operator gave one, still applies as an
-  -- additional floor on top (never LOWER than what they asked for),
-  -- and DEFAULTS.minFuel is the fallback only when there's no chestPos
-  -- to compute a dynamic floor from at all. Confirmed live as a real
-  -- gap, not a hypothetical one: a turtle whose fuel dropped below a
-  -- static minFuel, but stayed above dom-main/controller/scheduler.lua's
-  -- own unrelated flat stranded threshold, just got redispatched into
-  -- the identical immediate failure forever -- nothing ever recognized
-  -- it needed help. Tying both to the same distance-based formula (see
-  -- scheduler.lua's own M.isStranded()/M.needsSelfRefuel()) is what
-  -- actually closes that gap.
-  local function effectiveMinFuel()
-    if not chestPos then return explicitMinFuel or DEFAULTS.minFuel end
-    local dynamic = fuel.safeReturnFuel(nav.getPosition(), chestPos)
-    if explicitMinFuel then return math.max(explicitMinFuel, dynamic) end
-    return dynamic
-  end
-
   -- stepDown/columnDY's own defaults depend on observant (see DEFAULTS
   -- above) -- only applies when neither is given explicitly; an explicit
   -- value always wins regardless of observant.
@@ -821,6 +804,42 @@ function M.run(params, shouldStop)
     or (observant and DEFAULTS.stepDownObservant or DEFAULTS.stepDownInattentive)
   local columnDY = params.columnDY
     or (observant and DEFAULTS.columnDYObservant or DEFAULTS.columnDYInattentive)
+  local passFuelBudget = miningCycleFuelBudget(length, stepDown, thorough)
+
+  -- Recomputed at every fuel check below, not just once at the top:
+  -- the distance back to chestPos keeps growing as a pass digs deeper,
+  -- so the safe floor has to grow with it. lib/fuel.lua's
+  -- M.safeReturnFuel() (2x the direct fuel cost back to chestPos, by
+  -- its own default -- see there for why the multiplier lives in
+  -- exactly one place) plus passFuelBudget is the actual floor whenever
+  -- chestPos is known. The extra budget covers the planned mining work
+  -- that can happen before the next mid-pass fuel check, so a turtle
+  -- stops while it still has room to return to the chest itself instead
+  -- of burning down into the controller's rescue-only stranded range.
+  -- explicitMinFuel, if the operator gave one, still applies as an
+  -- additional floor on top (never LOWER than what they asked for), and
+  -- DEFAULTS.minFuel is the fallback only when there's no chestPos to
+  -- compute a dynamic floor from at all.
+  local function effectiveMinFuel()
+    if not chestPos then return explicitMinFuel or DEFAULTS.minFuel end
+    local dynamic = fuel.safeReturnFuel(nav.getPosition(), chestPos) + passFuelBudget
+    if explicitMinFuel then return math.max(explicitMinFuel, dynamic) end
+    return dynamic
+  end
+
+  local function ensureFuelFloor()
+    local minFuel = effectiveMinFuel()
+    local fuelLevel = turtle.getFuelLevel()
+    if fuelLevel == "unlimited" or fuelLevel >= minFuel then return true end
+    fuel.ensureFuel(minFuel)
+    fuelLevel = turtle.getFuelLevel()
+    minFuel = effectiveMinFuel()
+    return fuelLevel == "unlimited" or fuelLevel >= minFuel
+  end
+
+  local function shouldRefuel()
+    return not ensureFuelFloor()
+  end
 
   local width = WIDTH_FACINGS[tostring(widthFacing):lower()]
   if not width then
@@ -897,27 +916,22 @@ function M.run(params, shouldStop)
       local passStartDepth = startDepth
       startDepth = nil
 
-      local fuelLevel = turtle.getFuelLevel()
-      local minFuel = effectiveMinFuel()
-      if fuelLevel ~= "unlimited" and fuelLevel < minFuel then
-        fuel.ensureFuel(minFuel) -- tries inventory, then front/up/down/left/right -- see lib/fuel.lua
-        fuelLevel = turtle.getFuelLevel()
-        minFuel = effectiveMinFuel() -- ensureFuel() didn't move the turtle, but re-check anyway rather than trust a value from before the top-up attempt
-        if fuelLevel ~= "unlimited" and fuelLevel < minFuel then
-          print(("vertical: stopping -- fuel %s below minimum %d"):format(tostring(fuelLevel), minFuel))
-          -- keepCheckpoint = true (3rd return value, see lib/job.lua's
-          -- M.run()): unlike every other stop reason here, this one is
-          -- worth resuming from exactly where it left off once refueled
-          -- -- dom-main/controller/scheduler.lua's fuel-rescue flow does
-          -- exactly that (lib/job.lua's M.resumeOrRequest()) rather than
-          -- walking back to the cell's origin and re-digging from
-          -- scratch. The checkpoint already on disk (from the last
-          -- completed stepDown+leg cycle, whenever that was) is still
-          -- perfectly valid here -- this fuel check runs before that
-          -- cycle's own work even starts, so nothing since then needs
-          -- to be captured fresh.
-          return false, "insufficient fuel", true
-        end
+      if not ensureFuelFloor() then
+        local fuelLevel = turtle.getFuelLevel()
+        local minFuel = effectiveMinFuel()
+        print(("vertical: stopping -- fuel %s below minimum %d"):format(tostring(fuelLevel), minFuel))
+        -- keepCheckpoint = true (3rd return value, see lib/job.lua's
+        -- M.run()): unlike every other stop reason here, this one is
+        -- worth resuming from exactly where it left off once refueled
+        -- -- dom-main/controller/scheduler.lua's fuel-rescue flow does
+        -- exactly that (lib/job.lua's M.resumeOrRequest()) rather than
+        -- walking back to the cell's origin and re-digging from
+        -- scratch. The checkpoint already on disk (from the last
+        -- completed stepDown+leg cycle, whenever that was) is still
+        -- perfectly valid here -- this fuel check runs before that
+        -- cycle's own work even starts, so nothing since then needs
+        -- to be captured fresh.
+        return false, "insufficient fuel", true
       end
 
       local unloadOk, unloadErr = unloadIfFull(tidy, chestPos)
@@ -942,6 +956,7 @@ function M.run(params, shouldStop)
         :format(widthIndex, dir, columnStart.x, columnStart.y, columnStart.z))
 
       local legCount, reason, fatal = digColumn(length, stepDown, height, observant, thorough, tidy, chestPos, unreachableNames, shouldStop,
+        shouldRefuel,
         passStartDepth,
         function(depth)
           job.checkpoint({ widthIndex = widthIndex, dirIndex = dirIndex, columnStart = columnStart, dySign = dySign, depth = depth })
@@ -963,6 +978,11 @@ function M.run(params, shouldStop)
       if reason == "interrupted" then
         interrupted = true
         break
+      end
+
+      if reason == "fuel" then
+        print("vertical: stopping -- fuel below dynamic return minimum after a mining cycle")
+        return false, "insufficient fuel", true
       end
     end
 
@@ -1004,7 +1024,7 @@ function M.run(params, shouldStop)
     -- travel above) is safe to interrupt: this is "start of the next
     -- unit of work", not a safety step recovering from one already in
     -- progress, so it's fine for a fresh stop request to cut it short.
-    local reached, info = pathfind.goto(nextX, nextY, nextZ, { tolerance = 0, allowDig = "safe", shouldStop = shouldStop })
+    local reached, info = routing.goto(nextX, nextY, nextZ, { tolerance = 0, allowDig = "safe", shouldStop = shouldStop })
     if not reached then
       if info.reason == "interrupted" then
         print("vertical: interrupted while moving to the next width position")

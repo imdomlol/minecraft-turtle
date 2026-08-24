@@ -8,8 +8,9 @@
   lib/pathfind.lua trip whenever there's no controller, no route, or a
   waypoint hop itself fails partway through.
 
-  A short trip skips the round trip entirely and goes straight to
-  lib/pathfind.lua -- see LONG_TRIP_THRESHOLD. This is deliberately its
+  A short trip tries lib/pathfind.lua first and only asks the controller
+  for a route if that local attempt fails. A long trip asks the
+  controller first -- see LONG_TRIP_THRESHOLD. This is deliberately its
   own file, not an addition to lib/pathfind.lua itself: pathfind.lua
   stays a purely local, controller-agnostic stepper (useful even on a
   turtle with no controller at all), and "ask for a long-distance route"
@@ -73,24 +74,12 @@ local function requestRoute(controllerId, fromPos, toPos, tolerance, timeoutSeco
   end
 end
 
--- Same signature/return shape as lib/pathfind.lua's M.goto.
-function M.goto(x, y, z, opts)
-  opts = opts or {}
-  local target = { x = x, y = y, z = z }
-  local from = nav.getPosition()
-
-  if manhattan(from, target) < (opts.longTripThreshold or LONG_TRIP_THRESHOLD) then
-    return pathfind.goto(x, y, z, opts)
-  end
-
+local function followControllerRoute(from, target, opts)
   local controllerId = fleet.getControllerId()
-  local waypoints = requestRoute(controllerId, from, target, opts.tolerance or 0, opts.routeTimeout or ROUTE_TIMEOUT)
-  if not waypoints or #waypoints == 0 then
-    -- No controller, no route, or (the #waypoints == 0 case) already
-    -- within tolerance -- either way lib/pathfind.lua's own distance
-    -- check handles "already there" correctly on its own, so a direct
-    -- call covers every one of these cases correctly by itself.
-    return pathfind.goto(x, y, z, opts)
+  local waypoints, reason = requestRoute(controllerId, from, target, opts.tolerance or 0, opts.routeTimeout or ROUTE_TIMEOUT)
+  if not waypoints then return nil, reason end
+  if #waypoints == 0 then
+    return pathfind.goto(target.x, target.y, target.z, opts)
   end
 
   print(("routing: got a %d-waypoint route, walking it"):format(#waypoints))
@@ -103,7 +92,7 @@ function M.goto(x, y, z, opts)
       if info.reason == "interrupted" then return ok, info end
       print("routing: waypoint " .. i .. "/" .. #waypoints .. " failed (" .. tostring(info.reason)
         .. ") -- falling back to a direct trip for the rest")
-      return pathfind.goto(x, y, z, opts)
+      return pathfind.goto(target.x, target.y, target.z, opts)
     end
   end
 
@@ -112,6 +101,35 @@ function M.goto(x, y, z, opts)
   -- uses the same tolerance) -- one final direct call closes any gap
   -- pathfind.lua's own tolerance handling still needs to account for,
   -- and is a no-op (immediate "arrived") in the normal case.
+  return pathfind.goto(target.x, target.y, target.z, opts)
+end
+
+-- Same signature/return shape as lib/pathfind.lua's M.goto.
+function M.goto(x, y, z, opts)
+  opts = opts or {}
+  local target = { x = x, y = y, z = z }
+  local from = nav.getPosition()
+
+  if manhattan(from, target) < (opts.longTripThreshold or LONG_TRIP_THRESHOLD) then
+    local ok, info = pathfind.goto(x, y, z, opts)
+    if ok or (info and info.reason == "interrupted") then return ok, info end
+
+    print("routing: local pathfind failed (" .. tostring(info and info.reason)
+      .. ") -- trying controller route")
+    local routeOk, routeInfo = followControllerRoute(nav.getPosition(), target, opts)
+    if routeOk ~= nil then return routeOk, routeInfo end
+    print("routing: no controller route available (" .. tostring(routeInfo)
+      .. ") -- keeping local pathfind failure")
+    return ok, info
+  end
+
+  local routeOk, routeInfo = followControllerRoute(from, target, opts)
+  if routeOk ~= nil then return routeOk, routeInfo end
+
+  -- No controller or no route: never worse than before, just take the
+  -- direct local trip.
+  print("routing: no controller route available (" .. tostring(routeInfo)
+    .. ") -- using direct pathfind")
   return pathfind.goto(x, y, z, opts)
 end
 
