@@ -819,10 +819,22 @@ def main():
         # first, so an interleaved controller line can never get glued
         # onto some turtle's still-open one.
         #
-        # --silent additionally drops a fully-reassembled line if it's
-        # dom-main/mining/vertical.lua's routine "spotted <block>
-        # <direction>" call-out -- ore finds are tagged "(valuable)" by
-        # that file's own valuableTag() and are kept even then.
+        # --silent additionally drops a fully-reassembled line if it's:
+        #   - dom-main/mining/vertical.lua's routine "spotted <block>
+        #     <direction>" call-out -- ore finds are tagged "(valuable)"
+        #     by that file's own valuableTag() and are kept even then.
+        #   - a lib/pathfind.lua "heading to"/"arrived at" line for a
+        #     short hop -- mineVein calls M.goto once per block of a
+        #     vein it chases, each only a step or two, drowning out
+        #     genuinely long trips the same way the "spotted" noise
+        #     did. lib/pathfind.lua tags both lines with the ORIGINAL
+        #     travel distance as "[dist=N]" specifically so this can be
+        #     judged per-line without the console needing to correlate
+        #     a heading/arrived pair itself; PATHFIND_SHORT_HOP lets a
+        #     genuinely long trip's own heading/arrived pair through.
+        #     "stuck"/"interrupted"/"gave up" are never tagged this way
+        #     and always print regardless of distance -- a failure is
+        #     worth seeing no matter how short the attempted hop was.
         #
         # /log's text arrives as an arbitrary chunk of a streamed buffer,
         # not one line at a time -- a single poll can split a physical
@@ -832,12 +844,19 @@ def main():
         pending = [""]
         in_progress = {}  # sender -> its not-yet-flushed accumulated line
         LOG_SENDER_RE = re.compile(r"^\[([^\]]+)\] (.*)$")
+        PATHFIND_DIST_RE = re.compile(r"^pathfind: (?:heading to|arrived at) .*\[dist=([\d.]+)\]$")
+        PATHFIND_SHORT_HOP = 5.0
         KNOWN_MESSAGE_PREFIXES = (
             "vertical:", "pathfind:", "scheduler:", "fleet:", "fleet_listener:", "job:",
         )
 
         def is_noisy_content(content):
-            return content.startswith("vertical: spotted ") and "(valuable" not in content
+            if content.startswith("vertical: spotted ") and "(valuable" not in content:
+                return True
+            m = PATHFIND_DIST_RE.match(content)
+            if m and float(m.group(1)) <= PATHFIND_SHORT_HOP:
+                return True
+            return False
 
         def emit(sender, content):
             if args.silent and is_noisy_content(content):

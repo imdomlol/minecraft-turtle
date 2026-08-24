@@ -297,8 +297,15 @@ function M.goto(x, y, z, opts)
   local startDist = dist(target.x - pos.x, target.y - pos.y, target.z - pos.z)
   local maxSteps = math.max(20, math.floor(startDist * 4))
 
-  print(("pathfind: heading to (%d, %d, %d), tolerance=%d, allowDig=%s")
-    :format(x, y, z, tolerance, tostring(allowDig)))
+  -- [dist=%.1f] is a machine-parseable tag, not just for a human
+  -- reading it live -- `turtlectl.py console --silent` uses it to drop
+  -- a short hop (e.g. dom-main/mining/vertical.lua's mineVein calling
+  -- M.goto once per block of a vein, each only a step or two) while
+  -- still keeping a genuinely long trip. Kept on both this line and the
+  -- "arrived" one below so either can be classified on its own, without
+  -- the console needing to correlate a heading/arrived pair itself.
+  print(("pathfind: heading to (%d, %d, %d), tolerance=%d, allowDig=%s [dist=%.1f]")
+    :format(x, y, z, tolerance, tostring(allowDig), startDist))
 
   -- The position the previous step moved away from, passed to
   -- tryOneStep so it can deprioritize (not forbid -- see its own
@@ -318,7 +325,7 @@ function M.goto(x, y, z, opts)
     local dx, dy, dz = target.x - pos.x, target.y - pos.y, target.z - pos.z
     local d = dist(dx, dy, dz)
     if d <= tolerance then
-      print(("pathfind: arrived at (%d, %d, %d), %.1f blocks from target"):format(pos.x, pos.y, pos.z, d))
+      print(("pathfind: arrived at (%d, %d, %d), %.1f blocks from target [dist=%.1f]"):format(pos.x, pos.y, pos.z, d, startDist))
       return true, { reason = "arrived", distance = d, position = pos }
     end
 
