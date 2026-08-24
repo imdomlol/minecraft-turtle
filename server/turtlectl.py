@@ -17,7 +17,8 @@ Usage:
   turtlectl.py send-fleet <controller> <command...>   -- every turtle behind one controller
   turtlectl.py results <controller> [-n N]
   turtlectl.py watch <controller>
-  turtlectl.py console <controller>   -- live screen feed; type a command + enter to send it
+  turtlectl.py console <controller> [--silent]   -- live screen feed; type a command + enter to send it
+                                       (--silent drops routine per-block "spotted" noise)
   turtlectl.py roster <controller>    -- every turtle this controller currently knows about
   turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
@@ -575,6 +576,10 @@ def main():
 
     cp = sub.add_parser("console", help="Live console for a controller.")
     cp.add_argument("controller")
+    cp.add_argument("-s", "--silent", action="store_true",
+                     help="Suppress routine per-block 'spotted' lines (observant mode's "
+                          "stone/dirt call-outs) -- job progress (leg/pass done, dumping "
+                          "inventory, dispatches, etc) still prints.")
 
     # Shortcuts below all accept --wait/--wait-timeout via this shared parent.
     waitp = argparse.ArgumentParser(add_help=False)
@@ -782,6 +787,35 @@ def main():
         cursor = [0]
         HEARTBEAT_INTERVAL = 10  # seconds between mode.lua connect() heartbeats
 
+        # dom-main/mining/vertical.lua's scanUpDown/scanLeftRight print a
+        # "vertical: spotted <block> <above/below/to the left/to the
+        # right>" line for literally anything in that direction, ore or
+        # not -- with several turtles observant-mining at once this is
+        # most of what a live console shows. Ore finds are tagged
+        # "(valuable)" by vertical.lua's own valuableTag() and are kept
+        # even in --silent; only the routine stone/dirt call-outs (the
+        # actual complaint -- everything else, leg/pass progress, chest
+        # dumps, dispatches, etc, already prints far less often) are
+        # dropped.
+        #
+        # /log's text arrives as an arbitrary chunk of a streamed buffer,
+        # not one line at a time -- a single poll can split a line in the
+        # middle. `pending` carries whatever trailing partial line one
+        # poll leaves behind so it can be completed (and correctly
+        # filtered as a whole) by the next.
+        pending = [""]
+
+        def is_noisy_line(line):
+            return "vertical: spotted " in line and "(valuable" not in line
+
+        def filtered_write(text):
+            pending[0] += text
+            lines = pending[0].split("\n")
+            pending[0] = lines.pop()  # last element: not yet newline-terminated
+            for line in lines:
+                if not is_noisy_line(line):
+                    sys.stdout.write(line + "\n")
+
         def send_bookkeeping(command):
             """Fire-and-forget: a missed connect/disconnect heartbeat just
             gets retried on the next tick (or never matters again, for a
@@ -816,7 +850,10 @@ def main():
                         res = json.loads(resp.read().decode("utf-8"))
                     text = res.get("text", "")
                     if text:
-                        sys.stdout.write(text)
+                        if args.silent:
+                            filtered_write(text)
+                        else:
+                            sys.stdout.write(text)
                         sys.stdout.flush()
                     cursor[0] = res.get("cursor", cursor[0])
                     if last_err:
