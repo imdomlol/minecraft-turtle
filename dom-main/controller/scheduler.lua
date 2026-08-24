@@ -346,12 +346,37 @@ end
 -- with several turtles needing dispatch/rescue at once, the old
 -- sequential loop visibly moved one turtle at a time, leaving the rest
 -- idle for the full duration of whoever was dispatched first.
+-- Ticks between each "scheduler: tick N, ..." heartbeat print -- purely
+-- a liveness/visibility signal (there was previously no way to tell
+-- from the console whether the autopilot was actually running at all,
+-- versus just quiet because nothing currently needs attention), so it's
+-- throttled well below TICK_INTERVAL's own cadence to avoid adding to
+-- the console's existing noise.
+local HEARTBEAT_EVERY_N_TICKS = 12 -- ~60s at the default 5s TICK_INTERVAL
+local tickCount = 0
+
 function M.tick()
-  if not mode.shouldAutopilot() then return end
+  tickCount = tickCount + 1
+  if not mode.shouldAutopilot() then
+    if tickCount % HEARTBEAT_EVERY_N_TICKS == 0 then
+      print("scheduler: tick " .. tickCount .. " -- autopilot off (mode=" .. tostring(mode.get()) .. ")")
+    end
+    return
+  end
 
   local snapshot = roster.all()
   local names = {}
   for name in pairs(snapshot) do names[#names + 1] = name end
+
+  local strandedCount, idleCount = 0, 0
+  for _, entry in pairs(snapshot) do
+    if M.isStranded(entry) then strandedCount = strandedCount + 1
+    elseif M.isIdle(entry) then idleCount = idleCount + 1 end
+  end
+  if tickCount % HEARTBEAT_EVERY_N_TICKS == 0 then
+    print("scheduler: tick " .. tickCount .. " -- " .. #names .. " known, "
+      .. strandedCount .. " stranded, " .. idleCount .. " idle")
+  end
 
   local dispatched = {}
   local tasks = {}
