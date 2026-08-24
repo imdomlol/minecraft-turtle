@@ -86,6 +86,32 @@ local function upsert(senderId, message)
   rednet.send(senderId, { type = "version", value = dofile("/dom-main/controller/version.lua").get() }, PROTOCOL)
 end
 
+-- A turtle's own screen is only 39 columns wide, and lib/exec.lua's
+-- wrapTerm mirrors that real terminal faithfully -- CraftOS's print()
+-- word-wraps anything longer than that INTO the pendingLog buffer
+-- itself, as genuine embedded "\n"s, before a chunk of it is ever
+-- shipped here. Prefixing the whole chunk once (the old behavior) tags
+-- only its first physical line; every wrapped continuation line arrives
+-- with no sender attribution at all -- confirmed live as bare fragments
+-- like "the left" showing up with no context, and (worse for
+-- `turtlectl.py console --silent`) with no way to tell they're the tail
+-- of an otherwise-filtered "vertical: spotted ..." line. Prefixing every
+-- physical line lets a human read a wrapped line's sender directly, and
+-- lets console --silent's own continuation heuristic (see there) work
+-- at all.
+local function prefixEachLine(id, text)
+  local prefix = "[" .. tostring(id) .. "] "
+  local trailingNewline = text:sub(-1) == "\n"
+  local body = trailingNewline and text:sub(1, -2) or text
+  local out = {}
+  for line in (body .. "\n"):gmatch("(.-)\n") do
+    out[#out + 1] = prefix .. line
+  end
+  local result = table.concat(out, "\n")
+  if trailingNewline then result = result .. "\n" end
+  return result
+end
+
 -- Handles one incoming rednet message already known to be on our
 -- protocol. "result" messages are deliberately not handled here -- they
 -- only ever matter to a specific M.proxy() call waiting on a matching
@@ -110,7 +136,7 @@ function M.handleMessage(senderId, message)
   elseif message.type == "log" and message.id and message.text then
     if message.seq == nil or lastLogSeq[message.id] ~= message.seq then
       lastLogSeq[message.id] = message.seq
-      exec.append("[" .. tostring(message.id) .. "] " .. tostring(message.text))
+      exec.append(prefixEachLine(message.id, tostring(message.text)))
     end
   end
 end
