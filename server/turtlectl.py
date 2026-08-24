@@ -18,7 +18,9 @@ Usage:
   turtlectl.py results <controller> [-n N]
   turtlectl.py watch <controller>
   turtlectl.py console <controller> [--silent]   -- live screen feed; type a command + enter to send it
-                                       (--silent drops routine per-block "spotted" noise)
+                                       (always reflows a turtle's screen-wrapped lines back
+                                       into one; --silent additionally drops routine per-block
+                                       "spotted" noise)
   turtlectl.py roster <controller>    -- every turtle this controller currently knows about
   turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
@@ -788,44 +790,47 @@ def main():
         cursor = [0]
         HEARTBEAT_INTERVAL = 10  # seconds between mode.lua connect() heartbeats
 
-        # dom-main/mining/vertical.lua's scanUpDown/scanLeftRight print a
-        # "vertical: spotted <block> <above/below/to the left/to the
-        # right>" line for literally anything in that direction, ore or
-        # not -- with several turtles observant-mining at once this is
-        # most of what a live console shows. Ore finds are tagged
-        # "(valuable)" by vertical.lua's own valuableTag() and are kept
-        # even in --silent; only the routine stone/dirt call-outs (the
-        # actual complaint -- everything else, leg/pass progress, chest
-        # dumps, dispatches, etc, already prints far less often) are
-        # dropped.
-        #
         # A turtle's own screen is only 39 columns wide, so CraftOS's
-        # print() word-wraps a line like that into MULTIPLE physical
-        # lines before it's ever shipped -- dom-main/controller/
-        # roster.lua tags every one of them with its sender's "[Name] "
-        # prefix (see that file's own comment), but a wrapped
-        # continuation's own text (e.g. just "the left") never starts
-        # with a recognizable "vertical: ..."/"pathfind: ..." etc prefix
-        # of its own, so it can't be classified as noisy on its own
-        # content alone. `dropping_senders` tracks, per turtle, whether
-        # its last classified line was dropped and doesn't look like a
-        # fresh message was started -- KNOWN_MESSAGE_PREFIXES is this
-        # repo's actual, closed set of message-type prefixes (every
-        # print() in dom-main/ and lib/ uses exactly one of these), so
-        # "did the turtle start a NEW recognized message" is a precise
-        # check here, not a fuzzy guess. A line with no "[Name] " prefix
-        # at all (the controller's own local prints -- scheduler:,
-        # fleet_listener:, etc, and its own command echoes) always
-        # passes through untouched and never affects any turtle's
-        # dropping state.
+        # print() word-wraps anything longer than that INTO the log
+        # stream as genuine embedded newlines, sized to the TURTLE's
+        # screen -- not this console's. dom-main/controller/roster.lua
+        # tags every resulting physical line with its sender's "[Name] "
+        # prefix (see that file's own comment), but each one still
+        # arrives as its own separate printed line here, wrapped at a
+        # width that has nothing to do with this terminal.
+        #
+        # This reassembles every sender's wrapped physical lines back
+        # into the one logical line CraftOS originally wrapped, before
+        # ever writing anything out -- so what reaches this console is
+        # always one real print() call per line, left free to soft-wrap
+        # (or not) at THIS terminal's own width like any normal text.
+        # KNOWN_MESSAGE_PREFIXES is this repo's actual, closed set of
+        # message-type prefixes (every print() in dom-main/ and lib/
+        # uses exactly one of these) -- a physical line from a sender
+        # that's mid-accumulation and does NOT start with one of these
+        # is a wrap continuation, not a new message, and gets glued
+        # directly onto what's already accumulated (no separator needed:
+        # CraftOS's own wrap already left any necessary space in place,
+        # same as this example's trailing space before the wrap point:
+        # "vertical: spotted minecraft:stone to " + "the left"). A line
+        # with no "[Name] " prefix at all (the controller's own local
+        # prints -- scheduler:, fleet_listener:, etc, and its own
+        # command echoes) always flushes every sender's in-progress line
+        # first, so an interleaved controller line can never get glued
+        # onto some turtle's still-open one.
+        #
+        # --silent additionally drops a fully-reassembled line if it's
+        # dom-main/mining/vertical.lua's routine "spotted <block>
+        # <direction>" call-out -- ore finds are tagged "(valuable)" by
+        # that file's own valuableTag() and are kept even then.
         #
         # /log's text arrives as an arbitrary chunk of a streamed buffer,
-        # not one line at a time -- a single poll can split a line in the
-        # middle. `pending` carries whatever trailing partial line one
-        # poll leaves behind so it can be completed (and correctly
-        # classified as a whole) by the next.
+        # not one line at a time -- a single poll can split a physical
+        # line in the middle. `pending` carries whatever trailing
+        # partial line one poll leaves behind so it's completed (and
+        # correctly classified as a whole) by the next.
         pending = [""]
-        dropping_senders = set()
+        in_progress = {}  # sender -> its not-yet-flushed accumulated line
         LOG_SENDER_RE = re.compile(r"^\[([^\]]+)\] (.*)$")
         KNOWN_MESSAGE_PREFIXES = (
             "vertical:", "pathfind:", "scheduler:", "fleet:", "fleet_listener:", "job:",
@@ -834,26 +839,39 @@ def main():
         def is_noisy_content(content):
             return content.startswith("vertical: spotted ") and "(valuable" not in content
 
-        def should_drop(line):
+        def emit(sender, content):
+            if args.silent and is_noisy_content(content):
+                return
+            prefix = f"[{sender}] " if sender is not None else ""
+            sys.stdout.write(prefix + content + "\n")
+
+        def flush(sender):
+            if sender in in_progress:
+                emit(sender, in_progress.pop(sender))
+
+        def flush_all():
+            for sender in list(in_progress.keys()):
+                flush(sender)
+
+        def process_line(line):
             m = LOG_SENDER_RE.match(line)
             if not m:
-                return False  # no sender tag -- the controller's own line, always kept
+                flush_all()
+                emit(None, line)
+                return
             sender, content = m.group(1), m.group(2)
-            if sender in dropping_senders and not content.startswith(KNOWN_MESSAGE_PREFIXES):
-                return True  # continuation (wrapped remainder) of that sender's dropped line
-            if is_noisy_content(content):
-                dropping_senders.add(sender)
-                return True
-            dropping_senders.discard(sender)
-            return False
+            if sender in in_progress and not content.startswith(KNOWN_MESSAGE_PREFIXES):
+                in_progress[sender] += content
+                return
+            flush(sender)
+            in_progress[sender] = content
 
         def filtered_write(text):
             pending[0] += text
             lines = pending[0].split("\n")
             pending[0] = lines.pop()  # last element: not yet newline-terminated
             for line in lines:
-                if not should_drop(line):
-                    sys.stdout.write(line + "\n")
+                process_line(line)
 
         def send_bookkeeping(command):
             """Fire-and-forget: a missed connect/disconnect heartbeat just
@@ -889,10 +907,7 @@ def main():
                         res = json.loads(resp.read().decode("utf-8"))
                     text = res.get("text", "")
                     if text:
-                        if args.silent:
-                            filtered_write(text)
-                        else:
-                            sys.stdout.write(text)
+                        filtered_write(text)
                         sys.stdout.flush()
                     cursor[0] = res.get("cursor", cursor[0])
                     if last_err:
@@ -981,6 +996,8 @@ def main():
             pass
         finally:
             stop.set()
+            flush_all()  # don't lose a still-accumulating wrapped line at session end
+            sys.stdout.flush()
             send_bookkeeping('dofile("/dom-main/controller/mode.lua").disconnect()')
 
     elif args.cmd in SHORTCUT_NAMES:
