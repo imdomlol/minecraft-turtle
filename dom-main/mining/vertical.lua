@@ -271,6 +271,7 @@ local function mineVein(seeds, shouldStop, unreachableNames)
   end
 
   local mined = 0
+  local veinName = nil
   while #frontier > 0 and mined < MAX_VEIN_BLOCKS do
     if shouldStop and shouldStop() then break end
 
@@ -281,6 +282,7 @@ local function mineVein(seeds, shouldStop, unreachableNames)
       local reached = routing.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = "safe" })
       if reached then
         mined = mined + 1
+        veinName = veinName or target.name
         for _, delta in ipairs(NEIGHBOR_DELTAS) do
           local nx, ny, nz = target.x + delta.dx, target.y + delta.dy, target.z + delta.dz
           local nkey = nx .. "," .. ny .. "," .. nz
@@ -299,7 +301,7 @@ local function mineVein(seeds, shouldStop, unreachableNames)
   end
 
   if mined > 0 then
-    print(("vertical: chased a vein for %d block(s)"):format(mined))
+    print(("vertical: chased a %s vein for %d block(s)"):format(tostring(veinName or "valuable"), mined))
   end
 
   routing.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = "safe" })

@@ -789,9 +789,8 @@ def main():
     cp = sub.add_parser("console", help="Live console for a controller.")
     cp.add_argument("controller")
     cp.add_argument("-s", "--silent", action="store_true",
-                     help="Suppress routine per-block 'spotted' lines (observant mode's "
-                          "stone/dirt call-outs) -- job progress (leg/pass done, dumping "
-                          "inventory, dispatches, etc) still prints.")
+                     help="Suppress per-block 'spotted' lines, valuable or not -- job progress "
+                          "(vein summaries, leg/pass done, dumping inventory, dispatches, etc) still prints.")
 
     # Shortcuts below all accept --wait/--wait-timeout via this shared parent.
     waitp = argparse.ArgumentParser(add_help=False)
@@ -1049,8 +1048,8 @@ def main():
         #
         # --silent additionally drops a fully-reassembled line if it's:
         #   - dom-main/mining/vertical.lua's routine "spotted <block>
-        #     <direction>" call-out -- ore finds are tagged "(valuable)"
-        #     by that file's own valuableTag() and are kept even then.
+        #     <direction>" call-out, valuable or not. The useful signal
+        #     is the one-line "chased a <block> vein" summary instead.
         #   - a lib/pathfind.lua "heading to"/"arrived at" line for a
         #     short hop -- mineVein calls M.goto once per block of a
         #     vein it chases, each only a step or two, drowning out
@@ -1104,7 +1103,7 @@ def main():
         MAX_SILENT_ECHO_LENGTH = 120
 
         def is_noisy_content(content):
-            if content.startswith("vertical: spotted ") and "(valuable" not in content:
+            if content.startswith("vertical: spotted "):
                 return True
             m = PATHFIND_DIST_RE.match(content)
             if m and float(m.group(1)) <= PATHFIND_SHORT_HOP:
