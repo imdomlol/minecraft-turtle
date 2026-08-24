@@ -3,10 +3,16 @@
 
   There's no map to plan a real route against -- a turtle only ever sees
   the block immediately in front/above/below it (lib/nav.lua's inspect
-  functions). So this is a greedy stepper, not A*: every step it picks
-  whichever axis (x, z, or y) has the largest remaining distance and
-  tries to move that way, falling back to the other axes if that move
-  fails. Optionally digs/attacks through whatever's blocking it -- except
+  functions). So this is a greedy stepper, not A*: every step, it prefers
+  aligning y first -- climbing or descending straight to the target's own
+  height before ever moving horizontally -- falling back to x/z (whichever
+  has the bigger remaining distance) only once y is already aligned, or
+  immediately if the y move itself is blocked. Deliberately not just
+  "biggest remaining axis wins" (the old rule): once x/z and y deltas are
+  similar-sized, that interleaves between them nearly every step, digging
+  a disorganized staircase instead of one clean vertical climb/descent
+  followed by level horizontal travel -- confirmed live. Optionally
+  digs/attacks through whatever's blocking it -- except
   liquids (lib/nav.lua's isLiquid()), which it never digs, since a turtle
   can already move straight through one, and, unless opts.allowDig is
   specifically "all", chests or ComputerCraft blocks (lib/nav.lua's
@@ -126,9 +132,11 @@ local function moveY(sign, allowDig)
   return stepDown(allowDig)
 end
 
--- Tries every direction that would make progress this step, biggest
--- remaining-distance axis first, falling through to the others if the
--- preferred one fails -- then, if *all* of those are blocked, falls back
+-- Tries every direction that would make progress this step, y first
+-- (see this file's own top-of-file comment for why), then x/z by
+-- whichever has the bigger remaining distance, falling through to the
+-- others if the preferred one fails -- then, if *all* of those are
+-- blocked, falls back
 -- to trying whatever's left: the opposite way along any axis just tried,
 -- plus both ways on any axis that didn't need trying at all (already
 -- aligned with the target on it). A turtle boxed in by bedrock on every
@@ -191,7 +199,16 @@ local function tryOneStep(target, allowDig, justLeft)
       fn = function() return moveY(sign, allowDig) end }
   end
 
-  table.sort(toward, function(a, b) return a.amount > b.amount end)
+  -- y always sorts first when it's in play (dy ~= 0) -- see this file's
+  -- own top-of-file comment for why aligning height before ever moving
+  -- horizontally is deliberate, not an accident of amount-based sorting.
+  -- x vs z, when both are in play, still falls back to the bigger
+  -- remaining distance first, same as before.
+  table.sort(toward, function(a, b)
+    if a.axis == "y" then return true end
+    if b.axis == "y" then return false end
+    return a.amount > b.amount
+  end)
 
   local escape = {}
   if dx ~= 0 then
