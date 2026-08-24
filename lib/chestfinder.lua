@@ -219,6 +219,33 @@ function M.find(opts)
     end
   end
 
+  -- If the turtle is already directly above/below target (same x/z,
+  -- within verticalSearch()'s own reach on y) -- exactly where a
+  -- previous scanHere()/verticalSearch() success in THIS SAME search
+  -- left it -- try right here first, before ever forcing a trip back to
+  -- target's own tolerance=1 adjacency below. A caller retrying after
+  -- excluding a chest that turned out full (dom-main/mining/vertical.lua's
+  -- unloadIfFull(), looping this whole function) routinely lands in
+  -- exactly that position; unconditionally re-approaching target's
+  -- adjacency every retry would walk any vertical progress right back
+  -- down, only to immediately re-climb it -- confirmed live, a wasted
+  -- down-then-up-again bounce every time a vertical chest stack's next
+  -- candidate was also full. A genuinely fresh call (turtle elsewhere
+  -- entirely) never satisfies this, so it can't accidentally match some
+  -- unrelated chest far from the intended search area.
+  -- Horizontal distance <=1, not ==0: verticalSearch() only ever moves
+  -- via nav.up()/nav.down(), so it preserves the turtle's x/z EXACTLY as
+  -- they were when it was first invoked -- which is wherever the
+  -- initial tolerance=1 adjacency landed it (an orthogonal neighbor of
+  -- target, per this function's own tolerance=1 comment below -- off by
+  -- 1 on exactly one of x/z, not sitting exactly on target.x/target.z).
+  local herePos = nav.getPosition()
+  local horizontalDist = math.abs(herePos.x - target.x) + math.abs(herePos.z - target.z)
+  if horizontalDist <= 1 and math.abs(herePos.y - target.y) <= VERTICAL_SEARCH_HEIGHT then
+    local nearby = scanHere(matchName, opts.exclude) or verticalSearch(matchName, opts.exclude, VERTICAL_SEARCH_HEIGHT)
+    if nearby then return nearby end
+  end
+
   -- "safe" (dig/attack through obstacles, but never a chest or
   -- ComputerCraft block -- see lib/pathfind.lua), not false: this trip is
   -- typically home from wherever a mining job just dug to, through
