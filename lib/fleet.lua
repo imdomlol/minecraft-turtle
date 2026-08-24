@@ -142,12 +142,27 @@ end
 -- seconds, for `turtlectl.py console <controller>` to tail (the
 -- controller aggregates every turtle's log into its own relay /log
 -- feed). Same best-effort, no-retry shape as heartbeatLoop above.
+--
+-- `seq` increments once per push -- dom-main/controller/roster.lua's
+-- M.handleMessage() uses it to only append a given push once, even
+-- though it's routinely observed more than once: CraftOS resumes every
+-- coroutine currently parked in rednet.receive() with the same event,
+-- and dom-main/controller/roster.lua's M.proxy() reentrantly handles
+-- any message that isn't its own awaited reply (see that file's header
+-- comment) -- fine when only one proxy() call is ever blocked at a
+-- time, but dom-main/controller/scheduler.lua now dispatches several
+-- turtles concurrently (parallel.waitForAll), so several proxy() calls
+-- (plus fleet_listener.lua's own always-on receive loop) can all be
+-- blocked at once, each independently re-processing the exact same log
+-- push -- confirmed live as every console line appearing 2-3x over.
+local logSeq = 0
 local function logLoop(ident, controllerId)
   while true do
     sleep(LOG_PUSH_INTERVAL)
     local chunk = exec.pendingLog()
     if chunk ~= "" then
-      rednet.send(controllerId, { type = "log", id = ident.id, text = chunk }, PROTOCOL)
+      logSeq = logSeq + 1
+      rednet.send(controllerId, { type = "log", id = ident.id, text = chunk, seq = logSeq }, PROTOCOL)
       exec.dropSentLog(chunk)
     end
   end

@@ -38,6 +38,18 @@ local roster = {}        -- name -> { computerId, label, fuel, position, job, la
 local cmdCounter = 0
 local collisionCounter = 0
 
+-- name -> lib/fleet.lua log-push `seq` most recently appended -- see
+-- M.handleMessage()'s "log" case for why this is needed at all.
+-- Deliberately an exact-equality check there, not "seq must keep
+-- increasing": every duplicate delivery of one push carries the exact
+-- same seq (multiple listeners redundantly observing the one send), so
+-- comparing for equality catches it -- and, unlike a monotonic
+-- comparison, needs no special-casing for a turtle whose own seq
+-- counter restarts from 1 after a reboot: that first post-reboot push
+-- is simply a different value from whatever was last recorded, so it's
+-- accepted immediately rather than being mistaken for a stale repeat.
+local lastLogSeq = {}
+
 local function upsert(senderId, message)
   local name = message.id
   local existing = roster[name]
@@ -78,12 +90,28 @@ end
 -- protocol. "result" messages are deliberately not handled here -- they
 -- only ever matter to a specific M.proxy() call waiting on a matching
 -- cmd_id, which checks for them itself in its own wait loop below.
+--
+-- This is called both by dom-main/controller/fleet_listener.lua's own
+-- always-on receive loop AND reentrantly by every currently-blocked
+-- M.proxy() call (see that function's own comment) -- CraftOS resumes
+-- every coroutine parked in rednet.receive() with the same event, so a
+-- single log push from one turtle can reach this function once per
+-- listener that happens to be blocked at that moment, not once overall.
+-- Harmless for "heartbeat" (upsert() just overwrites the same roster
+-- entry again), but "log" would otherwise append the same text N times
+-- -- worse now that dom-main/controller/scheduler.lua dispatches
+-- several turtles concurrently, since several proxy() calls can be
+-- blocked at once. lastLogSeq skips a push already seen from that
+-- sender, by lib/fleet.lua's own monotonic per-turtle `seq`.
 function M.handleMessage(senderId, message)
   if type(message) ~= "table" then return end
   if message.type == "heartbeat" then
     upsert(senderId, message)
   elseif message.type == "log" and message.id and message.text then
-    exec.append("[" .. tostring(message.id) .. "] " .. tostring(message.text))
+    if message.seq == nil or lastLogSeq[message.id] ~= message.seq then
+      lastLogSeq[message.id] = message.seq
+      exec.append("[" .. tostring(message.id) .. "] " .. tostring(message.text))
+    end
   end
 end
 
