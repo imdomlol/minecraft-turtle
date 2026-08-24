@@ -32,5 +32,6 @@ return {
   "Udyr", "Urgot", "Varus", "Vayne", "Veigar", "Velkoz", "Vex", "Vi", "Viego",
   "Viktor", "Vladimir", "Volibear", "Warwick", "Wukong", "Xayah", "Xerath",
   "XinZhao", "Yasuo", "Yone", "Yorick", "Yuumi", "Zac", "Zed", "Zeri",
-  "Ziggs", "Zilean", "Zoe", "Zyra",
+  "Ziggs", "Zilean", "Zoe", "Zyra", "Melodi", "George", "Chris", "Gabe", "Elliot",
+  "Dom", "Jackson", "Justin",
 }
