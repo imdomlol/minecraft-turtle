@@ -128,7 +128,26 @@ function M.find(opts)
   -- typically home from wherever a mining job just dug to, through
   -- terrain nothing has opened up yet, not a step of the search itself --
   -- see the spiral search below, which stays deliberately non-destructive.
-  local reached, info = pathfind.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = "safe" })
+  --
+  -- tolerance=1, not 0: a caller-given (x, y, z) is routinely the chest's
+  -- OWN block position (e.g. a fleet controller's dom-main/controller/
+  -- worksite.lua chest location, given as exactly where the chest sits),
+  -- which is solid and, being a chest, explicitly never dug through
+  -- (shouldSkipDig in lib/pathfind.lua) even in "safe" mode -- tolerance=0
+  -- would demand the turtle occupy that same cell, which is permanently
+  -- impossible, so it would exhaust every escape move trying anyway
+  -- (confirmed live: turtles fumbling around a chest they could never
+  -- reach, eventually giving up, still full, and looping the exact same
+  -- failure forever on their next dispatch). tolerance=1 stops the turtle
+  -- adjacent instead -- since movement here is strictly axis-aligned one
+  -- step at a time, the first position within 1 block of an integer
+  -- target is always an orthogonal neighbor (never a diagonal one), so
+  -- scanHere()'s immediate 4-direction-plus-up/down inspect (right below)
+  -- reliably finds a chest sitting exactly at the given coordinates
+  -- without the spiral even needing to run. The same fix already exists
+  -- for the analogous case in dom-main/controller/scheduler.lua's rescue
+  -- dispatch (reaching a stranded turtle -- also a solid, occupied cell).
+  local reached, info = pathfind.goto(target.x, target.y, target.z, { tolerance = 1, allowDig = "safe" })
   if not reached then
     return nil, "could not reach search center: " .. tostring(info.reason)
   end
