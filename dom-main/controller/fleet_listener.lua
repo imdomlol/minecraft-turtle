@@ -59,6 +59,14 @@ function M.run()
   rednet.host(PROTOCOL, id)
   print("fleet_listener: hosting as \"" .. id .. "\" on protocol " .. PROTOCOL)
 
+  -- Every turtle this controller has EVER heard from (roster.lua's own
+  -- persisted state, surviving this very reboot) gets a direct ping
+  -- right away, rather than waiting out its own ~3s heartbeat cadence
+  -- to notice we're back -- see roster.lua's M.pingKnownTurtles() for
+  -- why this can't revive a genuinely dead turtle, only speed up a live
+  -- one's reappearance in the roster.
+  roster.pingKnownTurtles()
+
   while true do
     local senderId, message = rednet.receive(PROTOCOL)
     roster.handleMessage(senderId, message)

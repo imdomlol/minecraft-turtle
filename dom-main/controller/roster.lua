@@ -34,9 +34,41 @@ local DEFAULT_TIMEOUT = 60 -- seconds to wait for a proxied command's result
 
 local M = {}
 
+local STATE_PATH = "/state/roster.state"
+
 local roster = {}        -- name -> { computerId, label, fuel, position, job, lastSeen }
 local cmdCounter = 0
 local collisionCounter = 0
+
+local function save()
+  if not fs.exists("/state") then fs.makeDir("/state") end
+  local f = fs.open(STATE_PATH, "w")
+  f.write(textutils.serializeJSON(roster))
+  f.close()
+end
+
+-- Every turtle this controller has EVER heard from, not just this boot
+-- session's -- the in-memory roster used to start completely empty on
+-- every controller reboot, so a turtle that simply hadn't re-heartbeated
+-- yet was indistinguishable from one that never existed at all.
+-- lastSeen is loaded as-written (not reset to "now"), so
+-- M.report()'s secondsAgo correctly shows how long it's ACTUALLY been
+-- since a real heartbeat, through a controller reboot -- exactly the
+-- signal needed to tell "just slow to reconnect" apart from "genuinely
+-- gone silent". Runs once, at module load.
+local function loadPersisted()
+  if not fs.exists(STATE_PATH) then return end
+  local f = fs.open(STATE_PATH, "r")
+  local text = f.readAll()
+  f.close()
+  local ok, decoded = pcall(textutils.unserializeJSON, text)
+  if ok and type(decoded) == "table" then
+    for name, entry in pairs(decoded) do
+      roster[name] = entry
+    end
+  end
+end
+loadPersisted()
 
 -- name -> lib/fleet.lua log-push `seq` most recently appended -- see
 -- M.handleMessage()'s "log" case for why this is needed at all.
@@ -80,10 +112,31 @@ local function upsert(senderId, message)
     -- than needing to wait out some arbitrary initial delay.
     lastBlockPull = existing and existing.lastBlockPull or now,
   }
+  save()
 
   -- Piggybacked on every heartbeat rather than a separate round trip --
   -- see lib/updater.lua (turtle-side) for what it does with this.
   rednet.send(senderId, { type = "version", value = dofile("/dom-main/controller/version.lua").get() }, PROTOCOL)
+end
+
+-- Sent once at controller startup (see dom-main/controller/
+-- fleet_listener.lua, right after rednet.host()) to every turtle this
+-- controller has EVER heard from (see loadPersisted() above), addressed
+-- directly by its last-known computerId -- not rednet.lookup(), which
+-- is only for discovering an id we don't already have. lib/fleet.lua's
+-- listenLoop answers a "ping" with an immediate heartbeat, so a
+-- previously-known turtle that's still genuinely alive reappears in
+-- M.report() within moments of this controller coming back up, rather
+-- than waiting out its own ~3s heartbeat cadence. A turtle whose own
+-- process has actually died can't answer this (or anything else) either
+-- way -- this can't revive one, only shorten how long a live one stays
+-- looking stale after a controller reboot.
+function M.pingKnownTurtles()
+  for _, entry in pairs(roster) do
+    if entry.computerId then
+      rednet.send(entry.computerId, { type = "ping" }, PROTOCOL)
+    end
+  end
 end
 
 -- A turtle's own screen is only 39 columns wide, and lib/exec.lua's

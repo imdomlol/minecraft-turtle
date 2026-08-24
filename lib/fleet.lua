@@ -70,6 +70,35 @@ local function discoverController()
   end
 end
 
+-- Shared by heartbeatLoop's own cadence AND listenLoop's "ping" case
+-- (see below) -- a controller that just rebooted sends "ping" straight
+-- to every turtle it remembers, addressed by their last-known computer
+-- id, so a still-alive turtle reappears in its roster right away
+-- instead of waiting out this same ~3s cadence on its own. Fire-and-
+-- forget over rednet -- there's no delivery confirmation the way an
+-- HTTP response gives lib/remote.lua one, so a heartbeat lost to the
+-- controller being briefly out of range or mid-reboot is simply
+-- skipped; the next one re-establishes freshness regardless.
+local function sendHeartbeat(ident, controllerId)
+  local nav = dofile("/lib/nav.lua")
+  local job = dofile("/lib/job.lua")
+  local fuel = dofile("/lib/fuel.lua")
+
+  rednet.send(controllerId, {
+    type = "heartbeat",
+    id = ident.id,
+    label = os.getComputerLabel(),
+    fuel = turtle.getFuelLevel(),
+    -- Distinct from `fuel` (tank level): how many unspent fuel items
+    -- are sitting in inventory, right now the only thing
+    -- dom-main/controller/scheduler.lua's fuel-rescue can actually
+    -- hand to a stranded turtle.
+    fuelItems = fuel.spareFuelItems(),
+    position = nav.getPosition(),
+    job = job.status(),
+  }, PROTOCOL)
+end
+
 -- Blocks forever, answering exec requests from the controller and
 -- applying a "rename" message (see header comment) by writing the new
 -- identity through `ident` -- a shared mutable box (see M.run()) rather
@@ -99,6 +128,12 @@ local function listenLoop(ident, controllerId)
         ident.id = message.name
       elseif message.type == "version" and message.value then
         dofile("/lib/updater.lua").noteControllerVersion(message.value)
+      elseif message.type == "ping" then
+        -- A just-(re)booted controller reaching out to every turtle it
+        -- remembers (dom-main/controller/roster.lua's own persisted
+        -- state) -- answer with an immediate heartbeat instead of
+        -- making it wait out heartbeatLoop's own ~3s cadence.
+        sendHeartbeat(ident, controllerId)
       end
     end
   end
@@ -106,31 +141,11 @@ end
 
 -- Sends a status heartbeat every HEARTBEAT_INTERVAL seconds -- doubles as
 -- registration on the first send, since the controller has no separate
--- "register" message to wait for. Fire-and-forget over rednet -- there's
--- no delivery confirmation the way an HTTP response gives lib/remote.lua
--- one, so a heartbeat lost to the controller being briefly out of range
--- or mid-reboot is simply skipped; the next tick re-establishes
--- freshness regardless.
+-- "register" message to wait for.
 local function heartbeatLoop(ident, controllerId)
-  local nav = dofile("/lib/nav.lua")
-  local job = dofile("/lib/job.lua")
   local updater = dofile("/lib/updater.lua")
-  local fuel = dofile("/lib/fuel.lua")
-
   while true do
-    rednet.send(controllerId, {
-      type = "heartbeat",
-      id = ident.id,
-      label = os.getComputerLabel(),
-      fuel = turtle.getFuelLevel(),
-      -- Distinct from `fuel` (tank level): how many unspent fuel items
-      -- are sitting in inventory, right now the only thing
-      -- dom-main/controller/scheduler.lua's fuel-rescue can actually
-      -- hand to a stranded turtle.
-      fuelItems = fuel.spareFuelItems(),
-      position = nav.getPosition(),
-      job = job.status(),
-    }, PROTOCOL)
+    sendHeartbeat(ident, controllerId)
     -- Reuses this same ~3s cadence rather than adding a whole new loop
     -- just to poll "is it safe to reboot yet" -- see lib/updater.lua.
     updater.checkAndReboot()
