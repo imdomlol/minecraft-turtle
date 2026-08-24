@@ -36,6 +36,7 @@ function M.run()
       local entries = roster.pullBlocks(name, MAX_ENTRIES_PER_PULL, PULL_TIMEOUT)
       if entries then
         worldstore.recordBatch(entries)
+        worldstore.queueForStream(entries)
       end
       -- Marked as pulled whether or not it succeeded -- a persistently
       -- unreachable turtle (out of range, or just idle and quiet) would

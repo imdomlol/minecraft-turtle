@@ -149,6 +149,67 @@ function M.recordBatch(entries)
   end
 end
 
+-- Raw block names (not palette ids -- there's no shared-across-requests
+-- disk budget to justify the compression on this side channel) waiting
+-- to be shipped to the relay's /blocks endpoint by lib/remote.lua's
+-- stream loop, for an operator's external map viewer/database to follow
+-- live instead of only via a one-shot turtlectl.py worldexport. Merged
+-- by key rather than queued as a list of batches: two updates to the
+-- same coordinate before the next successful push only need to ship the
+-- latest one.
+local pendingStream = {}
+local MAX_PENDING_STREAM = 50000 -- distinct coordinates; see M.queueForStream
+
+function M.queueForStream(entries)
+  if not entries then return end
+  local count = M.pendingStreamCount()
+  for key, name in pairs(entries) do
+    if pendingStream[key] ~= nil then
+      pendingStream[key] = name
+    elseif count < MAX_PENDING_STREAM then
+      pendingStream[key] = name
+      count = count + 1
+    end
+    -- else: the relay's been unreachable long enough to fill the cap --
+    -- drop the update rather than grow unbounded. Nothing lost from the
+    -- source of truth (M.record() above already has it); a viewer that
+    -- was watching live just needs a fresh worldexport once reconnected.
+  end
+end
+
+function M.pendingStreamCount()
+  local n = 0
+  for _ in pairs(pendingStream) do n = n + 1 end
+  return n
+end
+
+-- A snapshot of every currently-pending entry, to POST to the relay. A
+-- copy, not the live table -- M.queueForStream() can run again (another
+-- coroutine, e.g. dom-main/controller/block_sync.lua's pull loop) while
+-- an http.post() built from this snapshot is in flight, and
+-- M.dropSentStream() needs to compare against what was actually sent,
+-- not whatever pendingStream has mutated into by the time it returns.
+function M.pendingStream()
+  local snapshot = {}
+  for key, name in pairs(pendingStream) do
+    snapshot[key] = name
+  end
+  return snapshot
+end
+
+-- Clears exactly the entries in `sent` (as returned by a prior
+-- M.pendingStream() call) that still hold the same value -- mirrors
+-- lib/exec.lua's dropSentLog() prefix-compare, so an entry that changed
+-- again while the post was in flight is correctly left pending instead
+-- of being silently dropped.
+function M.dropSentStream(sent)
+  for key, name in pairs(sent) do
+    if pendingStream[key] == name then
+      pendingStream[key] = nil
+    end
+  end
+end
+
 -- The block at (x, y, z), or nil if it's never been observed by any
 -- turtle whose batch has reached this controller.
 function M.query(x, y, z)
@@ -183,6 +244,37 @@ function M.flush()
       chunk.dirty = false
     end
   end
+end
+
+-- The whole known world, as one JSON string: { chunkSize = 16, palette =
+-- {id -> name}, chunks = {"cx_cy_cz" -> {"dx,dy,dz" -> id}} } -- for an
+-- operator pulling the map out to an external viewer (turtlectl.py
+-- worldexport), not used by anything on the controller itself. Reads
+-- every chunk that's either already cached in memory (possibly still
+-- dirty/unflushed) or sitting on disk from an earlier session, in that
+-- preference order, so a chunk created this session but not yet
+-- M.flush()'d is still included.
+function M.exportAll()
+  ensurePaletteLoaded()
+
+  local exported = {}
+  for key, chunk in pairs(chunks) do
+    exported[key] = chunk.cells
+  end
+  if fs.exists(WORLD_DIR) then
+    for _, file in ipairs(fs.list(WORLD_DIR)) do
+      local key = file:match("^(.+)%.chunk$")
+      if key and exported[key] == nil then
+        local cx, cy, cz = key:match("^(-?%d+)_(-?%d+)_(-?%d+)$")
+        if cx then
+          local chunk = getChunk(tonumber(cx), tonumber(cy), tonumber(cz), false)
+          if chunk then exported[key] = chunk.cells end
+        end
+      end
+    end
+  end
+
+  return textutils.serializeJSON({ chunkSize = CHUNK_SIZE, palette = paletteById, chunks = exported })
 end
 
 _G.__WORLDSTORE_MODULE = M

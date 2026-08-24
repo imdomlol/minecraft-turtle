@@ -5,6 +5,7 @@ relay.py -- HTTP command relay between an operator and ComputerCraft turtles.
 Turtles poll  POST /poll {id, label}                for a queued command
 Turtles post  POST /result {id, cmd_id, ok, output}  when a command finishes
 Turtles post  POST /log {id, text}                   append to the live console feed
+Turtles post  POST /blocks {id, entries}             ship newly-observed world blocks
 
 Operators (via turtlectl.py or curl) use:
   POST /cmd?id=<id>   {command}   queue a command for one turtle
@@ -12,6 +13,7 @@ Operators (via turtlectl.py or curl) use:
   GET  /status                    list turtles and when they last checked in
   GET  /results?id=<id>           recent results for one turtle
   GET  /log?id=<id>&after=<n>     live console feed since offset n
+  GET  /blocks?id=<id>&after=<n>  world-block updates since event n (see turtlectl.py worldwatch)
 
 Every request must include:  Authorization: Bearer <token>
 Set the shared secret via the RELAY_TOKEN environment variable before
@@ -36,10 +38,13 @@ if not TOKEN:
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relay_state.json")
 MAX_RESULTS_PER_TURTLE = 50
 MAX_LOG_CHARS = 20000  # per turtle; logs are in-memory only, not persisted
+MAX_BLOCK_BATCHES = 500  # per turtle; also in-memory only -- worldstore.lua's own
+                          # /state/world files on the controller are the durable copy
 
 lock = threading.Lock()
 state = {"turtles": {}, "queue": {}, "results": {}}
 logs = {}  # tid -> {"text": str, "base": int}  (base = chars trimmed off the front)
+block_events = {}  # tid -> {"batches": [{seq, entries, pushed_at}], "next_seq": int}
 
 
 def load_state():
@@ -116,6 +121,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_result(body)
         if path == "/log":
             return self._handle_log_post(body)
+        if path == "/blocks":
+            return self._handle_blocks_post(body)
         if path == "/cmd":
             return self._handle_cmd(params.get("id"), body)
         if path == "/cmd_all":
@@ -133,6 +140,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_results(params.get("id"))
         if path == "/log":
             return self._handle_log_get(params.get("id"), params.get("after"))
+        if path == "/blocks":
+            return self._handle_blocks_get(params.get("id"), params.get("after"))
         return self._send_json(404, {"error": "not found"})
 
     def _handle_poll(self, body):
@@ -191,6 +200,34 @@ class Handler(BaseHTTPRequestHandler):
             text = entry["text"][start:]
             cursor = entry["base"] + len(entry["text"])
         return self._send_json(200, {"text": text, "cursor": cursor})
+
+    def _handle_blocks_post(self, body):
+        tid = str(body.get("id") or "")
+        entries = body.get("entries")
+        if not tid or not entries:
+            return self._send_json(400, {"error": "missing id or entries"})
+        with lock:
+            bucket = block_events.setdefault(tid, {"batches": [], "next_seq": 1})
+            seq = bucket["next_seq"]
+            bucket["next_seq"] += 1
+            bucket["batches"].append({"seq": seq, "entries": entries, "pushed_at": time.time()})
+            # Trimming the oldest batches is safe without adjusting anything
+            # else -- unlike /log's char offsets, seq numbers never get
+            # reused or shifted, so a client polling with an old `after`
+            # just gets back whatever's still in the window (and can tell
+            # it missed some from the gap, if it cares).
+            del bucket["batches"][:-MAX_BLOCK_BATCHES]
+        return self._send_json(200, {"ok": True})
+
+    def _handle_blocks_get(self, tid, after):
+        if not tid:
+            return self._send_json(400, {"error": "missing id query param"})
+        after_n = int(after or 0)
+        with lock:
+            bucket = block_events.get(tid, {"batches": [], "next_seq": 1})
+            batches = [b for b in bucket["batches"] if b["seq"] > after_n]
+            cursor = bucket["next_seq"] - 1
+        return self._send_json(200, {"batches": batches, "cursor": cursor})
 
     def _handle_cmd(self, tid, body):
         if not tid:

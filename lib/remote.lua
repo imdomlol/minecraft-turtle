@@ -19,6 +19,7 @@ local CONFIG_PATH   = "/state/remote.cfg"
 local POLL_INTERVAL = 3    -- seconds between polls when idle
 local ERROR_BACKOFF = 10   -- seconds to wait after a network/HTTP error
 local LOG_PUSH_INTERVAL = 1.5 -- seconds between live-console flushes
+local BLOCK_PUSH_INTERVAL = 2 -- seconds between live worldstore.lua pushes
 
 local M = {}
 
@@ -120,6 +121,23 @@ local function streamLoop(cfg, id)
   end
 end
 
+-- Ships dom-main/controller/worldstore.lua's pending live-stream entries
+-- to the relay's /blocks endpoint every BLOCK_PUSH_INTERVAL seconds, for
+-- turtlectl.py worldwatch to tail. Only ever called from M.run(), which
+-- only the controller ever invokes (see controller_main.lua) -- a turtle
+-- has no dom-main/controller/*.lua on disk to dofile() here.
+local function blockStreamLoop(cfg, id)
+  local worldstore = dofile("/dom-main/controller/worldstore.lua")
+  while true do
+    sleep(BLOCK_PUSH_INTERVAL)
+    local pending = worldstore.pendingStream()
+    if next(pending) ~= nil then
+      local _, err = post(cfg, "/blocks", { id = id, entries = pending })
+      if not err then worldstore.dropSentStream(pending) end
+    end
+  end
+end
+
 -- Blocks forever, polling for and running commands while also streaming
 -- everything printed to the screen to the relay's live console feed.
 -- Meant to be run alongside other turtle work via parallel.waitForAny.
@@ -147,7 +165,8 @@ function M.run()
 
   parallel.waitForAny(
     function() pollLoop(cfg, id) end,
-    function() streamLoop(cfg, id) end
+    function() streamLoop(cfg, id) end,
+    function() blockStreamLoop(cfg, id) end
   )
 end
 

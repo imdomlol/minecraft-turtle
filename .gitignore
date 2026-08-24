@@ -1,4 +1,7 @@
 server/relay_state.json
 server/.relay_token
+server/.relay_url
 __pycache__/
 *.pyc
+.venv/
+viewer/

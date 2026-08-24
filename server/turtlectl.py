@@ -28,6 +28,10 @@ Usage:
   turtlectl.py version <controller> [N] [--bump]  -- get or set the controller's code version
   turtlectl.py worksite <controller> [minX minZ maxX maxZ y chestX chestY chestZ capacity]
                          -- get (no args) or set the current mining worksite
+  turtlectl.py worldexport <controller> [outfile]  -- pull the whole recorded world map to a
+                         local JSON file (default: world_export.json), for an external viewer
+  turtlectl.py worldwatch <controller> [jsonfile]  -- live-tail newly-observed blocks: NDJSON
+                         on stdout (pipe to your own script), keeps jsonfile patched in place
 
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
@@ -78,7 +82,11 @@ e.g. `goto Lux -89 55 -87 --dig` or `mine Lux --length 12`; `roster`
 takes none. Anything whose first word isn't a shortcut name is sent
 through unchanged, as raw Lua, run on the controller itself.
 
-Reads RELAY_URL and RELAY_TOKEN from the environment; --url/--token override.
+Reads RELAY_URL and RELAY_TOKEN from the environment, falling back to
+.relay_url/.relay_token files next to this script if either's unset
+(one value per file, no quoting/export syntax -- see _read_config_file());
+--url/--token override both. Precedence: --url/--token > environment >
+config file > built-in default ("http://localhost:8787" for the URL).
 """
 import argparse
 import json
@@ -90,6 +98,22 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _read_config_file(name):
+    """One-value-per-file fallback for RELAY_URL/RELAY_TOKEN -- e.g.
+    .relay_token next to this script, `chmod 600`'d like a real secret.
+    Whitespace-only or missing -> None, so callers can chain it with
+    `or` the same way they already do for env vars."""
+    path = os.path.join(SCRIPT_DIR, name)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        value = f.read().strip()
+    return value or None
+
 
 try:
     import readline  # noqa: F401 -- importing this enables input()'s up/down-arrow
@@ -145,6 +169,140 @@ def queue(url, args, description, command):
         else:
             print(f"(no result after {args.wait_timeout}s -- it may still be running; "
                   f"check with `results {args.controller}` or `console {args.controller}`)")
+
+
+WORLD_CHUNK_SIZE = 16  # must match dom-main/controller/worldstore.lua's own CHUNK_SIZE
+
+
+def _resolve_palette(data):
+    """Converts worldstore.lua's exportAll() shape ({chunkSize, palette:
+    {id -> name}, chunks: {chunkKey -> {cellKey -> id}}}) into flat block
+    names -- {chunkSize, chunks: {chunkKey -> {cellKey -> name}}}, no
+    palette. The palette is purely a CC:Tweaked-side disk-size trick
+    (see worldstore.lua's own header comment); nothing on the Python
+    side benefits from carrying it forward, and cmd_worldwatch's live
+    /blocks feed already only ever carries names, never ids -- so
+    resolving here once keeps every JSON file this tool produces in the
+    same, simpler shape.
+
+    CC:Tweaked's textutils.serializeJSON encodes paletteById as a JSON
+    object keyed by stringified id (see worldstore.lua's loadPalette()
+    comment, which relies on exactly that); a JSON array (id = index + 1)
+    is accepted too, defensively, in case that ever changes."""
+    palette = data.get("palette", {})
+    if isinstance(palette, list):
+        id_to_name = {str(i + 1): name for i, name in enumerate(palette)}
+    else:
+        id_to_name = palette
+
+    resolved_chunks = {}
+    for chunk_key, cells in data.get("chunks", {}).items():
+        resolved_chunks[chunk_key] = {
+            cell_key: id_to_name.get(str(block_id), f"unknown:id={block_id}")
+            for cell_key, block_id in cells.items()
+        }
+    return {"chunkSize": data.get("chunkSize", WORLD_CHUNK_SIZE), "chunks": resolved_chunks}
+
+
+def _chunk_and_cell_key(coord_key, chunk_size):
+    """Python mirror of worldstore.lua's chunkCoord()/localKey() -- turns
+    a live /blocks entry's "x,y,z" key into the same chunkKey/cellKey
+    worldexport's (already palette-resolved) JSON uses, so cmd_worldwatch
+    can patch that same file in place. Python's // is floor division
+    toward -inf for ints, same as Lua's math.floor(v / n) here -- both
+    bucket a negative coordinate like -1 into chunk -1, not 0."""
+    x, y, z = (int(v) for v in coord_key.split(","))
+    cx, cy, cz = x // chunk_size, y // chunk_size, z // chunk_size
+    dx, dy, dz = x - cx * chunk_size, y - cy * chunk_size, z - cz * chunk_size
+    return f"{cx}_{cy}_{cz}", f"{dx},{dy},{dz}"
+
+
+def cmd_worldexport(url, args):
+    """Pulls the controller's whole worldstore.lua (every recorded block,
+    chunked) and writes it to a local JSON file -- for feeding an
+    external viewer/database, not for printing to the console like the
+    other shortcuts. Always blocks for the result (there'd be nothing
+    useful to do with a bare cmd_id otherwise)."""
+    command = 'return dofile("/dom-main/controller/worldstore.lua").exportAll()'
+    res = request(f"{url}/cmd?id={args.controller}", args.token, "POST", {"command": command})
+    print(f"queued {res['cmd_id']} on controller {args.controller}: export worldstore")
+    print("waiting for result...")
+    r = wait_for_result(url, args.token, args.controller, res["cmd_id"], args.wait_timeout)
+    if not r:
+        print(f"error: no result after {args.wait_timeout}s -- it may still be running; "
+              f"check with `results {args.controller}`", file=sys.stderr)
+        sys.exit(1)
+    if not r.get("ok"):
+        print(f"error: {r.get('output')}", file=sys.stderr)
+        sys.exit(1)
+
+    # lib/exec.lua prefixes a single non-string return value's text with
+    # "= " (see its `suffix = "= " .. ...` branch) -- exportAll() returns
+    # a JSON string, so that's the only thing to strip before it's valid
+    # JSON on its own.
+    output = r.get("output", "")
+    if output.startswith("= "):
+        output = output[2:]
+
+    try:
+        raw = json.loads(output)
+    except json.JSONDecodeError as e:
+        print(f"error: controller's response wasn't valid JSON ({e}); raw output written to {args.outfile}.raw",
+              file=sys.stderr)
+        with open(f"{args.outfile}.raw", "w") as f:
+            f.write(output)
+        sys.exit(1)
+
+    data = _resolve_palette(raw)
+    with open(args.outfile, "w") as f:
+        json.dump(data, f, indent=2)
+    chunk_count = len(data.get("chunks", {}))
+    print(f"wrote {chunk_count} chunk(s) to {args.outfile}")
+
+
+def cmd_worldwatch(url, args):
+    """Long-polls the relay's /blocks endpoint for this controller and
+    keeps a local JSON cache (the same flat {chunkSize, chunks} shape
+    cmd_worldexport() writes -- run worldexport first to seed it, or
+    just let it start empty and fill in from here) patched in place, so
+    a large map never needs a full re-pull just to pick up what's
+    changed. Also prints each new batch as one line of NDJSON to stdout
+    (status/progress instead goes to stderr, so stdout stays clean),
+    so a separate script -- yours -- can do
+      turtlectl.py worldwatch Rakan | python3 my_db_writer.py
+    and read stdin line by line. What that script then does with each
+    batch (a SQLite upsert, or anything else) is deliberately not this
+    file's concern."""
+    chunk_size = WORLD_CHUNK_SIZE
+    chunks = {}
+    if os.path.exists(args.jsonfile):
+        with open(args.jsonfile) as f:
+            cached = json.load(f)
+        chunk_size = cached.get("chunkSize", WORLD_CHUNK_SIZE)
+        chunks = cached.get("chunks", {})
+        print(f"loaded {len(chunks)} cached chunk(s) from {args.jsonfile}", file=sys.stderr)
+
+    print(f"watching controller {args.controller} for live block updates (ctrl-c to stop)", file=sys.stderr)
+    cursor = 0
+    try:
+        while True:
+            resp = request(f"{url}/blocks?id={args.controller}&after={cursor}", args.token)
+            batches = resp.get("batches", [])
+            if batches:
+                for batch in batches:
+                    cursor = max(cursor, batch["seq"])
+                    print(json.dumps(batch))
+                    sys.stdout.flush()
+                    for coord_key, name in batch["entries"].items():
+                        chunk_key, cell_key = _chunk_and_cell_key(coord_key, chunk_size)
+                        chunks.setdefault(chunk_key, {})[cell_key] = name
+                with open(args.jsonfile, "w") as f:
+                    json.dump({"chunkSize": chunk_size, "chunks": chunks}, f, indent=2)
+            else:
+                cursor = resp.get("cursor", cursor)
+            time.sleep(args.poll_interval)
+    except KeyboardInterrupt:
+        pass
 
 
 def lua_bool(b):
@@ -555,8 +713,9 @@ to any turtle), e.g.:
 
 def main():
     p = argparse.ArgumentParser(description="Operator CLI for the turtle relay.")
-    p.add_argument("--url", default=os.environ.get("RELAY_URL", "http://localhost:8787"))
-    p.add_argument("--token", default=os.environ.get("RELAY_TOKEN"))
+    p.add_argument("--url", default=os.environ.get("RELAY_URL") or _read_config_file(".relay_url")
+                                     or "http://localhost:8787")
+    p.add_argument("--token", default=os.environ.get("RELAY_TOKEN") or _read_config_file(".relay_token"))
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("list", help="List known controllers.")
@@ -576,6 +735,22 @@ def main():
 
     wp = sub.add_parser("watch", help="Live-tail a controller's results.")
     wp.add_argument("controller")
+
+    wep = sub.add_parser("worldexport", help="Pull the controller's whole recorded world map to a local JSON file.")
+    wep.add_argument("controller")
+    wep.add_argument("outfile", nargs="?", default="world_export.json",
+                      help="Local path to write the JSON to (default: world_export.json).")
+    wep.add_argument("--wait-timeout", type=int, default=120,
+                      help="Seconds to wait for the export to come back (default 120).")
+
+    wwp = sub.add_parser("worldwatch", help="Live-tail newly-observed world blocks; NDJSON on stdout, "
+                                             "also keeps a local JSON cache patched in place.")
+    wwp.add_argument("controller")
+    wwp.add_argument("jsonfile", nargs="?", default="world_export.json",
+                      help="Local JSON cache to load from and keep patched (default: world_export.json -- "
+                           "the same file worldexport writes, so run that first to seed it).")
+    wwp.add_argument("--poll-interval", type=int, default=2,
+                      help="Seconds between polls of the relay's /blocks endpoint (default 2).")
 
     cp = sub.add_parser("console", help="Live console for a controller.")
     cp.add_argument("controller")
@@ -784,6 +959,12 @@ def main():
                 time.sleep(2)
         except KeyboardInterrupt:
             pass
+
+    elif args.cmd == "worldexport":
+        cmd_worldexport(url, args)
+
+    elif args.cmd == "worldwatch":
+        cmd_worldwatch(url, args)
 
     elif args.cmd == "console":
         stop = threading.Event()
