@@ -19,8 +19,11 @@ Usage:
   turtlectl.py watch <controller>
   turtlectl.py console <controller> [--silent]   -- live screen feed; type a command + enter to send it
                                        (always reflows a turtle's screen-wrapped lines back
-                                       into one; --silent additionally drops routine per-block
-                                       "spotted" noise)
+                                       into one, and always drops this console's own
+                                       connect()/disconnect() heartbeat noise; --silent
+                                       additionally drops routine per-block "spotted" noise,
+                                       short pathfind hops, and truncates long raw command
+                                       echoes)
   turtlectl.py roster <controller>    -- every turtle this controller currently knows about
   turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
@@ -1016,6 +1019,12 @@ def main():
         #     "stuck"/"interrupted"/"gave up" are never tagged this way
         #     and always print regardless of distance -- a failure is
         #     worth seeing no matter how short the attempted hop was.
+        #   - a raw command echo ("> ...") once it's clearly a machine-
+        #     generated dispatch rather than something a human typed --
+        #     truncated to MAX_SILENT_ECHO_LENGTH, not dropped outright.
+        # This console's own connect()/disconnect() heartbeat echoes are
+        # dropped unconditionally, --silent or not -- see
+        # BOOKKEEPING_ECHOES below.
         #
         # /log's text arrives as an arbitrary chunk of a streamed buffer,
         # not one line at a time -- a single poll can split a physical
@@ -1031,6 +1040,25 @@ def main():
             "vertical:", "pathfind:", "scheduler:", "fleet:", "fleet_listener:", "job:",
         )
 
+        # This console's own heartbeat (see send_bookkeeping()/poll_loop()
+        # above) round-trips through the controller's exec.lua like any
+        # other command, so it echoes "> dofile(...).connect()"/
+        # "disconnect()" into the very feed it's meant to be silently
+        # keeping alive -- pure bookkeeping noise with no legitimate
+        # reason to ever look at it, so this drops it unconditionally,
+        # not just under --silent.
+        BOOKKEEPING_ECHOES = frozenset({
+            '> dofile("/dom-main/controller/mode.lua").connect()',
+            '> dofile("/dom-main/controller/mode.lua").disconnect()',
+        })
+        # --silent also truncates (never entirely drops -- still worth
+        # knowing a long command ran, just not at full length) a raw
+        # command echo once it's clearly a machine-generated dispatch
+        # (dom-main/controller/scheduler.lua's assignWork()/rescue
+        # commands routinely run several hundred characters as one
+        # physical line) rather than something a human actually typed.
+        MAX_SILENT_ECHO_LENGTH = 120
+
         def is_noisy_content(content):
             if content.startswith("vertical: spotted ") and "(valuable" not in content:
                 return True
@@ -1040,8 +1068,13 @@ def main():
             return False
 
         def emit(sender, content):
-            if args.silent and is_noisy_content(content):
+            if content in BOOKKEEPING_ECHOES:
                 return
+            if args.silent:
+                if is_noisy_content(content):
+                    return
+                if content.startswith("> ") and len(content) > MAX_SILENT_ECHO_LENGTH:
+                    content = content[:MAX_SILENT_ECHO_LENGTH] + f"... [{len(content)} chars total]"
             prefix = f"[{sender}] " if sender is not None else ""
             sys.stdout.write(prefix + content + "\n")
 
