@@ -23,14 +23,13 @@
   hasKnownPosition()) -- a turtle whose position is unanchored gets left
   alone rather than sent an absolute-coordinate command aimed at nowhere.
 
-  Every dispatch (goto + start mining, or a rescue trip) is a single
-  blocking dom-main/controller/roster.lua M.proxy() call -- this only
-  blocks the scheduler's own coroutine branch (see controller_main.lua's
-  parallel.waitForAny), not the rest of the controller, so a slow
-  dispatch never delays relay polling, rednet listening, or block
-  syncing. Multiple turtles needing attention in the same tick are
-  handled one at a time, in whatever order pairs() happens to visit the
-  roster in -- fine for the turtle counts this is meant for.
+  Every dispatch (goto + start mining, or a rescue trip) is built from
+  one or more blocking dom-main/controller/roster.lua M.proxy() calls,
+  but every turtle needing attention in the same tick runs as its own
+  concurrent task under parallel.waitForAll (see M.tick()) -- a slow
+  dispatch only blocks that one turtle's own task, never the rest of the
+  fleet, and (same as before) never the rest of the controller either
+  (see controller_main.lua's own top-level parallel.waitForAny).
 ------------------------------------------------------------------------]]
 
 if _G.__SCHEDULER_MODULE then return _G.__SCHEDULER_MODULE end
@@ -38,6 +37,10 @@ if _G.__SCHEDULER_MODULE then return _G.__SCHEDULER_MODULE end
 local roster = dofile("/dom-main/controller/roster.lua")
 local worksite = dofile("/dom-main/controller/worksite.lua")
 local mode = dofile("/dom-main/controller/mode.lua")
+
+-- table.unpack (Lua 5.2+/CC:Tweaked) vs the global unpack (Lua 5.1,
+-- used by this repo's plain-lua5.1 test harnesses) -- whichever exists.
+local unpack = table.unpack or unpack
 
 local TICK_INTERVAL           = 5   -- seconds between scheduler passes
 local STRANDED_FUEL_THRESHOLD = 20  -- real fuel level below this counts as stranded
@@ -222,16 +225,27 @@ end
 --
 -- Rescues are resolved in their own pass, strictly before work
 -- assignment, and every turtle a rescue touches (rescuer or rescued) is
--- recorded in `dispatched` immediately -- both here, before that
--- rescue's own (blocking) dispatch even starts, and checked by every
--- later pickRescuer() call and by the work-assignment pass below.
--- Iteration order over a plain Lua table (pairs()) isn't guaranteed,
--- and without this a turtle picked as a rescuer for one
--- stranded turtle could otherwise also get handed its own work order in
--- the very same tick (if it's visited later in the loop), or get picked
--- as the rescuer for a *second* stranded turtle before its first rescue
--- trip is even done -- either way, sending it two conflicting orders
--- back to back.
+-- recorded in `dispatched` immediately -- both here, before any
+-- dispatch even starts, and checked by every later pickRescuer() call
+-- and by the work-assignment pass below. Iteration order over a plain
+-- Lua table (pairs()) isn't guaranteed, and without this a turtle picked
+-- as a rescuer for one stranded turtle could otherwise also get handed
+-- its own work order in the very same tick (if it's visited later in
+-- the loop), or get picked as the rescuer for a *second* stranded
+-- turtle before its first rescue trip is even done -- either way,
+-- sending it two conflicting orders back to back.
+--
+-- Every turtle's dispatch (a rescue trip, or a plain work assignment) is
+-- collected as its own task and run concurrently via
+-- parallel.waitForAll, rather than one at a time in a plain loop: each
+-- task's underlying roster.proxy() calls block only THAT task's own
+-- coroutine on rednet.receive, so while one turtle is mid-journey to its
+-- cell (or a rescuer is mid-journey to a stranded turtle), every other
+-- turtle's dispatch is already in flight too, instead of queued up
+-- behind it. Confirmed live as a real problem, not a hypothetical one:
+-- with several turtles needing dispatch/rescue at once, the old
+-- sequential loop visibly moved one turtle at a time, leaving the rest
+-- idle for the full duration of whoever was dispatched first.
 function M.tick()
   if not mode.shouldAutopilot() then return end
 
@@ -240,6 +254,7 @@ function M.tick()
   for name in pairs(snapshot) do names[#names + 1] = name end
 
   local dispatched = {}
+  local tasks = {}
   local rescues = {} -- { {strandedName, entry, rescuerName}, ... }, resolved before any are dispatched
   for _, name in ipairs(names) do
     local entry = snapshot[name]
@@ -257,7 +272,8 @@ function M.tick()
     end
   end
   for _, r in ipairs(rescues) do
-    M.attemptRescue(r[1], r[2], r[3])
+    local strandedName, strandedEntry, rescuerName = r[1], r[2], r[3]
+    tasks[#tasks + 1] = function() M.attemptRescue(strandedName, strandedEntry, rescuerName) end
   end
 
   for _, name in ipairs(names) do
@@ -266,9 +282,13 @@ function M.tick()
       if not M.hasKnownPosition(entry) then
         print("scheduler: " .. name .. " is idle but has no reliable position -- needs a manual `setpos` before autopilot will dispatch it")
       else
-        M.assignWork(name)
+        tasks[#tasks + 1] = function() M.assignWork(name) end
       end
     end
+  end
+
+  if #tasks > 0 then
+    parallel.waitForAll(unpack(tasks))
   end
 end
 
