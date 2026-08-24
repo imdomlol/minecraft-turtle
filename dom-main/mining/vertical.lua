@@ -409,25 +409,50 @@ local function protectedKind(data)
   return "chest"
 end
 
--- If the inventory's full, finds a chest and empties into it, then
--- returns to the exact position/heading this was called from -- NOT
--- necessarily a pass's own start; this is also called after every leg
--- step (see digForward below), not just once per pass, so a full
--- inventory gets caught within a single leg instead of potentially
+-- Caps how many chests one unloadIfFull() call will try before giving
+-- up -- correctness doesn't actually need this (chestfinder.find()'s
+-- own exclude set means a chest already tried is never found again, and
+-- its own maxRadius already bounds each individual search), but every
+-- other bounded-retry loop in this file has an explicit cap of its own
+-- (MAX_VEIN_BLOCKS, pathfind.lua's maxSteps) as a hard backstop against
+-- an unforeseen bug looping forever, and a designated chest area is
+-- never going to legitimately need more than this many chests for one
+-- inventory anyway.
+local MAX_CHESTS_PER_UNLOAD = 20
+
+-- If the inventory's full, finds a chest and empties into it -- and, if
+-- that chest couldn't take everything, keeps searching the SAME
+-- designated area for another one instead of giving up with a still-
+-- full inventory (see MAX_CHESTS_PER_UNLOAD above for why this doesn't
+-- loop forever): a real chest area is routinely more than one chest,
+-- and a turtle stopping the instant the first one it finds happens to
+-- be full -- confirmed live -- wastes the rest of the area for no
+-- reason. chestfinder.find()'s own `exclude` option is what makes this
+-- safe to loop: without it, re-searching from right next to a chest
+-- that's still full would just immediately re-"find" that exact same
+-- one forever, never reaching a different chest.
+--
+-- Returns to the exact position/heading this was called from once
+-- done -- NOT necessarily a pass's own start; this is also called after
+-- every leg step (see digForward below), not just once per pass, so a
+-- full inventory gets caught within a single leg instead of potentially
 -- waiting out an entire deep pass. Returns true (whether or not
--- anything actually needed unloading), or false, reason if no chest
--- could be found (or tidy is off), or if the turtle couldn't get back to
--- where it was. No shouldStop here either, for the same reason as
--- returnToColumnStart/mineVein's own return-to-origin above -- the trip
--- back is a recovery step and must finish once started, not be cut short
--- by a stop request that arrived while it was full.
+-- anything actually needed unloading), or false, reason if no (further)
+-- chest could be found (or tidy is off), or if the turtle couldn't get
+-- back to where it was. No shouldStop here either, for the same reason
+-- as returnToColumnStart/mineVein's own return-to-origin above -- the
+-- trip back is a recovery step and must finish once started, not be cut
+-- short by a stop request that arrived while it was full.
 -- chestPos (optional, { x, y, z } -- e.g. from a fleet controller's
 -- dom-main/controller/worksite.lua) searches around that known chest
 -- instead of lib/home.lua's remembered position, for a turtle whose
 -- actual mining site is nowhere near home. "Around", not "at": still a
 -- chestfinder.lua radius search (see its own default maxRadius), not an
 -- exact-position assumption, since a manually-given coordinate is
--- usually approximate.
+-- usually approximate. Every retry in the loop below keeps searching
+-- around that SAME original chestPos (not wherever the turtle ends up
+-- after the first drop) -- the designated chest area, not "somewhere
+-- near the last chest".
 local function unloadIfFull(tidy, chestPos)
   if not inventory.isFull() then return true end
 
@@ -437,21 +462,37 @@ local function unloadIfFull(tidy, chestPos)
 
   local origin = nav.getPosition()
   print("vertical: inventory full, looking for a chest to unload into")
-  local found, reason
-  if chestPos then
-    found, reason = chestfinder.find({ x = chestPos.x, y = chestPos.y, z = chestPos.z })
-  else
-    found, reason = chestfinder.find({})
-  end
-  if not found then
-    return false, "inventory full, no chest found: " .. tostring(reason)
+
+  local tried = {}
+  local totalEmptied, chestsUsed = 0, 0
+  while inventory.isFull() do
+    if chestsUsed >= MAX_CHESTS_PER_UNLOAD then
+      return false, "inventory still full after trying " .. chestsUsed .. " chest(s) in the area"
+    end
+
+    local searchOpts = { exclude = tried }
+    if chestPos then
+      searchOpts.x, searchOpts.y, searchOpts.z = chestPos.x, chestPos.y, chestPos.z
+    end
+    local found, reason = chestfinder.find(searchOpts)
+    if not found then
+      if chestsUsed > 0 then
+        return false, "inventory full, no more chests found nearby after using " .. chestsUsed
+          .. ": " .. tostring(reason)
+      end
+      return false, "inventory full, no chest found: " .. tostring(reason)
+    end
+
+    local emptied = inventory.dropAll(found.direction)
+    totalEmptied = totalEmptied + emptied
+    chestsUsed = chestsUsed + 1
+    print(("vertical: unloaded %d slot(s) into chest at (%d, %d, %d)")
+      :format(emptied, found.x, found.y, found.z))
+    tried[chestfinder.posKey(found.x, found.y, found.z)] = true
   end
 
-  local emptied = inventory.dropAll(found.direction)
-  print(("vertical: unloaded %d slot(s) into chest at (%d, %d, %d)")
-    :format(emptied, found.x, found.y, found.z))
-  if inventory.isFull() then
-    return false, "chest at (" .. found.x .. "," .. found.y .. "," .. found.z .. ") couldn't take everything"
+  if chestsUsed > 1 then
+    print(("vertical: unloaded %d slot(s) total across %d chests"):format(totalEmptied, chestsUsed))
   end
 
   local reached, info = pathfind.goto(origin.x, origin.y, origin.z, { tolerance = 0, allowDig = "safe" })

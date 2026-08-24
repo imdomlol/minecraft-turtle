@@ -41,18 +41,32 @@ local function looksLikeChest(name, matchName)
   return name:lower():find("chest", 1, true) ~= nil
 end
 
+local function posKey(x, y, z)
+  return x .. "," .. y .. "," .. z
+end
+
 -- Checks the 4 horizontal neighbors (turning through all of them) plus
 -- up/down of the turtle's current cell. Returns the chest's world
 -- position, block name, and which turtle.drop*() variant reaches it
 -- ("front", "up", or "down"), leaving the turtle facing it (or unmoved,
 -- for up/down) -- or nil if nothing here matches.
-local function scanHere(matchName)
+--
+-- `exclude` (optional, a set keyed by posKey(x,y,z)) skips a chest
+-- whose position is in it, continuing on as if it weren't there at all
+-- -- see M.find()'s own comment on why a caller needs this: without it,
+-- re-searching from right next to a chest that's already been tried
+-- (and is still full) would just immediately re-"find" that exact same
+-- one, over and over, never reaching a genuinely different chest.
+local function scanHere(matchName, exclude)
   for _ = 1, 4 do
     local found, data = turtle.inspect()
     if found and looksLikeChest(data.name, matchName) then
       local pos = nav.getPosition()
       local d = DELTA[pos.heading]
-      return { x = pos.x + d.x, y = pos.y, z = pos.z + d.z, name = data.name, direction = "front" }
+      local x, y, z = pos.x + d.x, pos.y, pos.z + d.z
+      if not (exclude and exclude[posKey(x, y, z)]) then
+        return { x = x, y = y, z = z, name = data.name, direction = "front" }
+      end
     end
     nav.turnRight()
   end
@@ -60,24 +74,95 @@ local function scanHere(matchName)
   local foundUp, dataUp = turtle.inspectUp()
   if foundUp and looksLikeChest(dataUp.name, matchName) then
     local pos = nav.getPosition()
-    return { x = pos.x, y = pos.y + 1, z = pos.z, name = dataUp.name, direction = "up" }
+    local x, y, z = pos.x, pos.y + 1, pos.z
+    if not (exclude and exclude[posKey(x, y, z)]) then
+      return { x = x, y = y, z = z, name = dataUp.name, direction = "up" }
+    end
   end
 
   local foundDown, dataDown = turtle.inspectDown()
   if foundDown and looksLikeChest(dataDown.name, matchName) then
     local pos = nav.getPosition()
-    return { x = pos.x, y = pos.y - 1, z = pos.z, name = dataDown.name, direction = "down" }
+    local x, y, z = pos.x, pos.y - 1, pos.z
+    if not (exclude and exclude[posKey(x, y, z)]) then
+      return { x = x, y = y, z = z, name = dataDown.name, direction = "down" }
+    end
   end
 
   return nil
 end
 
+-- Chests are routinely stacked vertically -- one directly above/below
+-- another -- not just spread out horizontally. scanHere()'s own up/down
+-- inspect can't detect that on its own: it looks directly above/below
+-- the TURTLE's cell, not above/below whatever chest it's facing, and
+-- the horizontal spiral below never changes height at all. Right after
+-- excluding a chest (see M.find()'s own `exclude` comment), the turtle
+-- is still standing adjacent to it, still facing it (scanHere()'s own
+-- full 4-turn loop ends back at the heading it started with) -- so
+-- before spiraling outward, check straight up and down from exactly
+-- here first: moving the turtle itself up/down one level at a time,
+-- level with a potential neighbor, is what lets its FRONT-facing
+-- inspect (not up/down) actually find one. Restores the turtle to its
+-- original height before returning on failure, so the horizontal
+-- spiral (or the caller) starts from exactly where it expects to.
+local VERTICAL_SEARCH_HEIGHT = 6
+
+local function verticalSearch(matchName, exclude, maxHeight)
+  local up = 0
+  while up < maxHeight do
+    if not nav.up() then break end
+    up = up + 1
+    local found = scanHere(matchName, exclude)
+    if found then return found end
+  end
+  for _ = 1, up do nav.down() end
+
+  local down = 0
+  while down < maxHeight do
+    if not nav.down() then break end
+    down = down + 1
+    local found = scanHere(matchName, exclude)
+    if found then return found end
+  end
+  for _ = 1, down do nav.up() end
+
+  return nil
+end
+
+-- If genuinely nothing's here but the direction the spiral is about to
+-- start walking is blocked, turns toward an open one first (up to a
+-- full turn) -- doesn't touch the spiral's own geometry at all, just
+-- makes sure its first step isn't walking straight into a wall.
+-- Routinely needed on a retry (see M.find()'s own `exclude` comment):
+-- right after excluding a chest that's still full, the turtle is
+-- usually standing right next to it, still facing it -- a real, solid
+-- block, just already tried -- and without this, the very first spiral
+-- step would immediately report "search blocked" and give up, even
+-- with a genuinely different chest just a few blocks past it in
+-- another direction. Only tried before the FIRST step, not for a
+-- later, genuine dead-end deeper in the search -- that should still
+-- stop rather than force a way through, same as before.
+local function faceOpenDirection()
+  for _ = 1, 4 do
+    if not turtle.inspect() then return end
+    nav.turnRight()
+  end
+end
+
 -- Classic expanding square spiral: leg lengths 1,1,2,2,3,3,... turning
 -- right after each leg, covering a roughly (maxRadius*2)-wide square
 -- around the starting point. Scans every cell it visits along the way.
-local function spiralSearch(maxRadius, matchName)
-  local found = scanHere(matchName)
+-- Tries straight up/down first (see verticalSearch above) before ever
+-- moving horizontally.
+local function spiralSearch(maxRadius, matchName, exclude)
+  local found = scanHere(matchName, exclude)
   if found then return found end
+
+  found = verticalSearch(matchName, exclude, VERTICAL_SEARCH_HEIGHT)
+  if found then return found end
+
+  faceOpenDirection()
 
   local legLength = 1
   local turnsAtThisLength = 0
@@ -86,7 +171,7 @@ local function spiralSearch(maxRadius, matchName)
     for _ = 1, legLength do
       local ok = nav.forward()
       if not ok then return nil, "search blocked" end
-      local f = scanHere(matchName)
+      local f = scanHere(matchName, exclude)
       if f then return f end
     end
     nav.turnRight()
@@ -100,10 +185,21 @@ local function spiralSearch(maxRadius, matchName)
   return nil, "not found within radius " .. maxRadius
 end
 
+-- posKey(x, y, z) is the exact string M.find()'s own `exclude` set (see
+-- below) must be keyed by -- exposed so a caller (e.g. dom-main/mining/
+-- vertical.lua's own retry-the-next-chest loop) can build one.
+M.posKey = posKey
+
 -- Searches for a chest-like block near (x, y, z) -- default: lib/home.lua's
 -- recorded position. opts.maxRadius (default 8) bounds the search;
 -- opts.matchName(name) overrides the default "name contains 'chest'"
 -- check, for modded storage blocks that don't follow that convention.
+-- opts.exclude (optional, a set keyed by M.posKey(x,y,z)) skips any
+-- chest whose position is in it, as if it weren't there at all -- for a
+-- caller retrying after a chest it already found turned out to be full
+-- (or already tried some other way): without this, re-searching from
+-- right next to that same chest would just immediately re-"find" it
+-- again, never reaching a genuinely different one.
 -- Reaching (x, y, z) in the first place digs through obstacles ("safe"
 -- mode, see above); the search itself, once there, never does. Returns
 -- the chest's position/name on success. On failure, returns nil,
@@ -153,7 +249,7 @@ function M.find(opts)
   end
 
   local searchStart = nav.getPosition()
-  local found, reason = spiralSearch(maxRadius, matchName)
+  local found, reason = spiralSearch(maxRadius, matchName, opts.exclude)
   if found then return found end
 
   pathfind.goto(searchStart.x, searchStart.y, searchStart.z, { tolerance = 0, allowDig = false })
