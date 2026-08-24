@@ -61,6 +61,37 @@ function M.hasFuel(minLevel)
   return level == "unlimited" or level >= minLevel
 end
 
+-- Manhattan distance between two {x,y,z} positions -- the number of
+-- individual moves a direct trip between them costs, since every
+-- successful forward/up/down/back move burns exactly 1 fuel regardless
+-- of digging (only movement costs fuel). Pure arithmetic, no turtle.*
+-- calls -- unlike everything else in this module, safe to call from a
+-- controller too (dom-main/controller/scheduler.lua uses this to judge
+-- a turtle's fuel against its OWN distance from the worksite's chest,
+-- without needing the `turtle` API a controller doesn't have).
+function M.travelCost(fromPos, toPos)
+  return math.abs(toPos.x - fromPos.x) + math.abs(toPos.y - fromPos.y) + math.abs(toPos.z - fromPos.z)
+end
+
+-- The fuel level worth keeping in reserve to comfortably make it from
+-- `fromPos` back to `toPos` (typically a worksite's known chest) --
+-- `multiplier` (default 2) times the direct travelCost() above, as a
+-- safety margin against a real path being longer than a straight
+-- Manhattan line (obstacles, backtracking) and against needing fuel for
+-- anything else along the way. Both dom-main/mining/vertical.lua's own
+-- minFuel check and dom-main/controller/scheduler.lua's stranded/
+-- self-refuel judgment call this the same way, with no multiplier
+-- given -- letting the default live in exactly one place is what keeps
+-- the two permanently in agreement instead of drifting apart the way a
+-- turtle's own job-level minFuel and the scheduler's old flat
+-- STRANDED_FUEL_THRESHOLD did (confirmed live: a turtle below its job's
+-- minFuel but above that unrelated flat threshold just got redispatched
+-- into the identical immediate failure, forever, with no rescue ever
+-- triggered).
+function M.safeReturnFuel(fromPos, toPos, multiplier)
+  return (multiplier or 2) * M.travelCost(fromPos, toPos)
+end
+
 -- How many fuel-type items this turtle is carrying, distinct from its
 -- current fuel LEVEL (tank contents already burned into fuel level
 -- can't be un-burned and handed to another turtle -- only unspent items

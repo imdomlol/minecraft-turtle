@@ -746,7 +746,11 @@ function M.run(params, shouldStop)
   params = params or {}
   local length      = params.length or DEFAULTS.length
   local height      = params.height -- nil = no cap, dig to bedrock
-  local minFuel     = params.minFuel or DEFAULTS.minFuel
+  -- nil, not DEFAULTS.minFuel, when the operator didn't give one --
+  -- see effectiveMinFuel() below, which only falls back to
+  -- DEFAULTS.minFuel when there's no chestPos to compute a dynamic
+  -- floor from either.
+  local explicitMinFuel = params.minFuel
   local columnStep  = params.columnStep or DEFAULTS.columnStep
   local widthFacing = params.widthFacing or DEFAULTS.widthFacing
   local widthCap    = params.width -- nil = unlimited
@@ -754,6 +758,30 @@ function M.run(params, shouldStop)
   local chestPos    = params.chestPos -- optional { x, y, z } -- nil = lib/home.lua's remembered position, as before
   local observant   = optBool(params.observant, DEFAULTS.observant)
   local thorough    = optBool(params.thorough, DEFAULTS.thorough)
+
+  -- Recomputed at every fuel check below, not just once at the top:
+  -- the distance back to chestPos keeps growing as a pass digs deeper,
+  -- so the safe floor has to grow with it. lib/fuel.lua's
+  -- M.safeReturnFuel() (2x the direct fuel cost back to chestPos, by
+  -- its own default -- see there for why the multiplier lives in
+  -- exactly one place) is the actual floor whenever chestPos is known;
+  -- explicitMinFuel, if the operator gave one, still applies as an
+  -- additional floor on top (never LOWER than what they asked for),
+  -- and DEFAULTS.minFuel is the fallback only when there's no chestPos
+  -- to compute a dynamic floor from at all. Confirmed live as a real
+  -- gap, not a hypothetical one: a turtle whose fuel dropped below a
+  -- static minFuel, but stayed above dom-main/controller/scheduler.lua's
+  -- own unrelated flat stranded threshold, just got redispatched into
+  -- the identical immediate failure forever -- nothing ever recognized
+  -- it needed help. Tying both to the same distance-based formula (see
+  -- scheduler.lua's own M.isStranded()/M.needsSelfRefuel()) is what
+  -- actually closes that gap.
+  local function effectiveMinFuel()
+    if not chestPos then return explicitMinFuel or DEFAULTS.minFuel end
+    local dynamic = fuel.safeReturnFuel(nav.getPosition(), chestPos)
+    if explicitMinFuel then return math.max(explicitMinFuel, dynamic) end
+    return dynamic
+  end
 
   -- stepDown/columnDY's own defaults depend on observant (see DEFAULTS
   -- above) -- only applies when neither is given explicitly; an explicit
@@ -839,9 +867,11 @@ function M.run(params, shouldStop)
       startDepth = nil
 
       local fuelLevel = turtle.getFuelLevel()
+      local minFuel = effectiveMinFuel()
       if fuelLevel ~= "unlimited" and fuelLevel < minFuel then
         fuel.ensureFuel(minFuel) -- tries inventory, then front/up/down/left/right -- see lib/fuel.lua
         fuelLevel = turtle.getFuelLevel()
+        minFuel = effectiveMinFuel() -- ensureFuel() didn't move the turtle, but re-check anyway rather than trust a value from before the top-up attempt
         if fuelLevel ~= "unlimited" and fuelLevel < minFuel then
           print(("vertical: stopping -- fuel %s below minimum %d"):format(tostring(fuelLevel), minFuel))
           -- keepCheckpoint = true (3rd return value, see lib/job.lua's

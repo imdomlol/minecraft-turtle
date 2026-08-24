@@ -4,13 +4,21 @@
   dom-main/controller/mode.lua's M.shouldAutopilot() says it's allowed to.
 
   Every tick, for each turtle currently in the roster:
-    - stranded (real fuel level, not "unlimited", below
-      STRANDED_FUEL_THRESHOLD) -> attemptRescue(): find an idle turtle
-      carrying spare fuel ITEMS (lib/fuel.lua's M.spareFuelItems() --
-      distinct from fuel LEVEL, see there for why), send it to stand next
-      to the stranded one and hand over half its spare fuel, then have
-      the stranded turtle refuel and go back to work.
-    - idle (and not stranded) -> assignWork(): claim this turtle's
+    - stranded (M.isStranded() -- can't reach the worksite's known
+      chest under its own power at all) -> attemptRescue(): find an
+      idle turtle carrying spare fuel ITEMS (lib/fuel.lua's
+      M.spareFuelItems() -- distinct from fuel LEVEL, see there for
+      why), send it to stand next to the stranded one and hand over
+      half its spare fuel, then have the stranded turtle refuel and go
+      back to work.
+    - idle and needsSelfRefuel() (can reach the chest on its own, just
+      not enough left to keep mining safely once there) -> M.dispatchToChest():
+      send it to refuel itself, no second turtle needed, then back to
+      work -- this is the common case a turtle's own dynamic minFuel
+      floor (see dom-main/mining/vertical.lua) is actually SIZED for:
+      it stops with enough margin to comfortably land here, not in
+      M.isStranded() above.
+    - idle otherwise -> assignWork(): claim this turtle's
       dom-main/controller/worksite.lua cell (sticky -- the same turtle
       always gets the same cell back), goto its origin, and start
       mine_vertical there with the worksite's known chest wired in as
@@ -37,17 +45,23 @@ if _G.__SCHEDULER_MODULE then return _G.__SCHEDULER_MODULE end
 local roster = dofile("/dom-main/controller/roster.lua")
 local worksite = dofile("/dom-main/controller/worksite.lua")
 local mode = dofile("/dom-main/controller/mode.lua")
+local fuel = dofile("/lib/fuel.lua")
 
 -- table.unpack (Lua 5.2+/CC:Tweaked) vs the global unpack (Lua 5.1,
 -- used by this repo's plain-lua5.1 test harnesses) -- whichever exists.
 local unpack = table.unpack or unpack
 
 local TICK_INTERVAL           = 5   -- seconds between scheduler passes
-local STRANDED_FUEL_THRESHOLD = 20  -- real fuel level below this counts as stranded
+-- Flat fallback for M.isStranded()/M.needsSelfRefuel() ONLY when there's
+-- no worksite chest or no known position to compute the real,
+-- distance-based figures from (see both functions' own comments) --
+-- not the primary judgment call whenever that info is available.
+local STRANDED_FUEL_THRESHOLD = 20
 local RESCUE_MIN_FUEL_ITEMS   = 4   -- a rescuer needs at least this many spare fuel items to bother sending
 local DISPATCH_TIMEOUT        = 300 -- seconds -- generous: a fresh/idle turtle's origin could be far away
 local RESCUE_TIMEOUT          = 120
 local REFUEL_TIMEOUT          = 30
+local REFUEL_TRIP_TIMEOUT     = 120
 
 local M = {}
 
@@ -77,8 +91,46 @@ function M.isIdle(entry)
   return entry.job ~= nil and entry.job.current == "idle"
 end
 
+-- Genuinely can't reach the worksite's known chest under its own power
+-- -- fuel below the direct (1x) travel cost there, per lib/fuel.lua's
+-- M.travelCost(). This is deliberately NOT the same bar as dom-main/
+-- mining/vertical.lua's own minFuel floor (M.safeReturnFuel()'s 2x
+-- default): that one is set to make a turtle stop with a comfortable
+-- safety margin still in the tank, specifically so it USUALLY lands in
+-- M.needsSelfRefuel() below (can still get itself to the chest) rather
+-- than here. M.isStranded() is for the narrower, more serious case --
+-- can't even make it that far -- which actually needs another turtle's
+-- help. Falls back to the flat STRANDED_FUEL_THRESHOLD when there's no
+-- known position or no worksite chest to compute the real distance
+-- from (can't judge "can it reach the chest" without knowing where
+-- either one is).
 function M.isStranded(entry)
-  return type(entry.fuel) == "number" and entry.fuel < STRANDED_FUEL_THRESHOLD
+  if type(entry.fuel) ~= "number" then return false end
+  local chest = worksite.chest()
+  if not chest or not M.hasKnownPosition(entry) then
+    return entry.fuel < STRANDED_FUEL_THRESHOLD
+  end
+  return entry.fuel < fuel.travelCost(entry.position, chest)
+end
+
+-- Can reach the chest on its own, but doesn't have enough to keep
+-- mining safely once there and back -- exactly the gap that used to
+-- fall through both checks entirely: below dom-main/mining/
+-- vertical.lua's own (now dynamic) minFuel floor, but well above
+-- M.isStranded()'s much narrower "can't even reach the chest" bar, so
+-- nothing ever recognized it needed anything. Confirmed live: a turtle
+-- in exactly this state just kept getting redispatched into the
+-- identical immediate "insufficient fuel" stop, forever, with no rescue
+-- ever triggered (M.isStranded()'s old flat threshold never crossed)
+-- and no attempt to send it to refuel either. Cheaper than a full
+-- rescue -- no second turtle tied up -- since it can get there itself;
+-- see M.dispatchToChest() below.
+function M.needsSelfRefuel(entry)
+  if type(entry.fuel) ~= "number" then return false end
+  local chest = worksite.chest()
+  if not chest or not M.hasKnownPosition(entry) then return false end
+  if M.isStranded(entry) then return false end
+  return entry.fuel < fuel.safeReturnFuel(entry.position, chest)
 end
 
 -- False for a turtle whose reported position isn't anchored to the real
@@ -207,7 +259,18 @@ function M.attemptRescue(strandedName, strandedEntry, rescuerName)
   end
   print("scheduler: " .. rescuerName .. " reached " .. strandedName .. " -- " .. tostring(output))
 
-  local refuelOk, refuelOutput = roster.proxy(strandedName, 'return dofile("/lib/fuel.lua").ensureFuel(1)', REFUEL_TIMEOUT)
+  -- Target dom-main/mining/vertical.lua's own dynamic minFuel floor
+  -- (lib/fuel.lua's M.safeReturnFuel(), from the stranded turtle's
+  -- OWN current position -- unchanged since the rescuer came TO it,
+  -- not the other way around), not just "1" -- ensureFuel(1) used to
+  -- be enough back when minFuel was a flat, much lower number, but
+  -- against the now-dynamic floor it would routinely leave the turtle
+  -- still below what mine_vertical needs, hitting the identical
+  -- "insufficient fuel" stop again the moment it resumed.
+  local chest = worksite.chest()
+  local refuelTarget = chest and fuel.safeReturnFuel(pos, chest) or 1
+  local refuelOk, refuelOutput = roster.proxy(strandedName,
+    "return dofile(\"/lib/fuel.lua\").ensureFuel(" .. refuelTarget .. ")", REFUEL_TIMEOUT)
   if not refuelOk then
     print("scheduler: " .. strandedName .. " still couldn't refuel after the rescue: " .. tostring(refuelOutput))
     return false, "refuel after rescue failed: " .. tostring(refuelOutput)
@@ -215,6 +278,40 @@ function M.attemptRescue(strandedName, strandedEntry, rescuerName)
 
   print("scheduler: " .. strandedName .. " refueled -- sending it back to its cell")
   return M.assignWork(strandedName)
+end
+
+-- For a turtle that M.needsSelfRefuel() -- enough fuel to reach the
+-- worksite's known chest under its own power, just not enough to keep
+-- mining safely once there -- rather than tying up a second turtle for
+-- a full M.attemptRescue(), send it to the chest itself: reach it (
+-- lib/chestfinder.lua, same non-destructive search dom-main/mining/
+-- vertical.lua's own unloadIfFull() uses), top up from whatever fuel
+-- is sitting there (lib/fuel.lua's M.ensureFuel(), which already tries
+-- the turtle's own inventory first), then resume its cell exactly like
+-- any other idle dispatch (M.assignWork() -- picks the checkpoint back
+-- up if there is one, same as a real rescue does).
+function M.dispatchToChest(name, entry)
+  local chest = worksite.chest()
+  local target = fuel.safeReturnFuel(entry.position, chest)
+  print("scheduler: sending " .. name .. " to the chest to refuel (enough to get there, not enough to keep mining safely)")
+
+  local command = string.format(
+    'local chestfinder = dofile("/lib/chestfinder.lua"); '
+      .. 'local found, reason = chestfinder.find({ x = %d, y = %d, z = %d }); '
+      .. 'if not found then return false, "could not reach the chest: " .. tostring(reason) end; '
+      .. 'local ok, refuelReason = dofile("/lib/fuel.lua").ensureFuel(%d); '
+      .. 'if not ok then return false, "reached the chest but could not refuel: " .. tostring(refuelReason) end; '
+      .. 'return true, "refueled to " .. tostring(turtle.getFuelLevel())',
+    chest.x, chest.y, chest.z, target
+  )
+
+  local ok, output = roster.proxy(name, command, REFUEL_TRIP_TIMEOUT)
+  if not ok then
+    print("scheduler: " .. name .. " couldn't refuel at the chest: " .. tostring(output))
+    return false, output
+  end
+  print("scheduler: " .. name .. " " .. tostring(output) .. " -- sending it back to its cell")
+  return M.assignWork(name)
 end
 
 -- One autopilot pass. Snapshots the roster's names to a plain array
@@ -281,6 +378,8 @@ function M.tick()
     if entry and not dispatched[name] and M.isIdle(entry) then
       if not M.hasKnownPosition(entry) then
         print("scheduler: " .. name .. " is idle but has no reliable position -- needs a manual `setpos` before autopilot will dispatch it")
+      elseif M.needsSelfRefuel(entry) then
+        tasks[#tasks + 1] = function() M.dispatchToChest(name, entry) end
       else
         tasks[#tasks + 1] = function() M.assignWork(name) end
       end
