@@ -191,6 +191,12 @@ function M.handleMessage(senderId, message)
       lastLogSeq[message.id] = message.seq
       exec.append(prefixEachLine(message.id, tostring(message.text)))
     end
+  elseif message.type == "route_request" and message.request_id and message.from and message.to then
+    -- Only enqueues -- dom-main/controller/router.lua's own M.run()
+    -- coroutine does the actual (potentially slow) A* search, so this
+    -- stays fast enough to never delay dom-main/controller/
+    -- fleet_listener.lua's receive loop from handling anything else.
+    dofile("/dom-main/controller/router.lua").enqueue(senderId, message.request_id, message.from, message.to, message.tolerance)
   end
 end
 

@@ -32,7 +32,16 @@
   number (see dom-main/controller/roster.lua's upsert()) through to
   lib/updater.lua, and checks right after whether it's now safe to
   reboot for a pending update -- see that module for the actual policy.
+
+  Cached on _G like lib/nav.lua/lib/job.lua/etc -- plain dofile() always
+  re-executes a file and hands back a fresh table, so anything else that
+  also dofile()s this (lib/routing.lua, to reach M.getControllerId())
+  would otherwise get its own independent copy, with its own `controllerId`
+  local that stays nil forever -- only the ONE instance M.run() actually
+  executes on ever has it set.
 ------------------------------------------------------------------------]]
+
+if _G.__FLEET_MODULE then return _G.__FLEET_MODULE end
 
 local exec = dofile("/lib/exec.lua")
 
@@ -48,6 +57,18 @@ local M = {}
 -- get at the same constant, rather than duplicating the string and
 -- risking the two sides drifting apart.
 M.PROTOCOL = PROTOCOL
+
+-- Set once M.run() has actually discovered a controller (see
+-- discoverController() below) -- exposed so a module that needs to talk
+-- to it directly, outside this file's own request/reply message types
+-- (e.g. lib/routing.lua's route requests), doesn't have to duplicate
+-- rednet.lookup() discovery or thread the id through as a parameter
+-- everywhere. nil until M.run() has actually found one.
+local controllerId = nil
+
+function M.getControllerId()
+  return controllerId
+end
 
 -- Blocks until a controller answers, retrying with backoff -- mirrors
 -- lib/remote.lua's pollLoop error-backoff shape, just for discovery
@@ -219,7 +240,9 @@ function M.run()
   print("fleet: identity is " .. ident.id)
 
   print("fleet: looking for a controller...")
-  local controllerId = discoverController()
+  -- Assigns the module-level `controllerId` above (no `local` here) --
+  -- M.getControllerId() exposes exactly this.
+  controllerId = discoverController()
   print("fleet: controller is computer #" .. controllerId)
 
   term.redirect(exec.wrapTerm(term.current()))
@@ -231,4 +254,5 @@ function M.run()
   )
 end
 
+_G.__FLEET_MODULE = M
 return M

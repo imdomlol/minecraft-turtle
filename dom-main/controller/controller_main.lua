@@ -9,15 +9,20 @@
   in this dimension over rednet and lets an operator's relay-issued
   commands reach them (see dom-main/controller/roster.lua's M.proxy()),
   dom-main/controller/block_sync.lua, which pulls buffered block
-  observations from turtles into dom-main/controller/worldstore.lua, and
+  observations from turtles into dom-main/controller/worldstore.lua,
   dom-main/controller/scheduler.lua, the autopilot that keeps turtles
   working (or gets them back to it) whenever dom-main/controller/mode.lua
-  allows.
+  allows, and dom-main/controller/router.lua, which computes long-
+  distance A* routes for turtles that ask (dom-main/controller/roster.lua
+  just enqueues a request -- router.run() is its own coroutine
+  specifically so a slow search never delays fleet_listener.lua's
+  receive loop from handling anything else).
 ------------------------------------------------------------------------]]
 
 local remote = dofile("/lib/remote.lua")
 local fleetListener = dofile("/dom-main/controller/fleet_listener.lua")
 local blockSync = dofile("/dom-main/controller/block_sync.lua")
 local scheduler = dofile("/dom-main/controller/scheduler.lua")
+local router = dofile("/dom-main/controller/router.lua")
 
-parallel.waitForAny(remote.run, fleetListener.run, blockSync.run, scheduler.run)
+parallel.waitForAny(remote.run, fleetListener.run, blockSync.run, scheduler.run, router.run)
