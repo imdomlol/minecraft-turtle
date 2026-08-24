@@ -106,11 +106,16 @@ local function grabFuelItems(direction, maxAttempts)
   return kept
 end
 
--- Drops half of every fuel-type stack currently carried, to whatever's
--- immediately in front -- same dry-run-fuel-check pattern as
--- grabFuelItems above, giving instead of taking. Returns how many items
--- were dropped.
-local function giveHalfFuel()
+-- Drops half of every fuel-type stack currently carried, in the given
+-- direction ("front" (default), "up", or "down" -- matches
+-- lib/chestfinder.lua's own found.direction shape) -- same dry-run-fuel-
+-- check pattern as grabFuelItems above, giving instead of taking.
+-- Returns how many items were dropped.
+local function giveHalfFuel(direction)
+  local drop = turtle.drop
+  if direction == "up" then drop = turtle.dropUp
+  elseif direction == "down" then drop = turtle.dropDown end
+
   local originalSlot = turtle.getSelectedSlot()
   local dropped = 0
   for slot = 1, 16 do
@@ -118,7 +123,7 @@ local function giveHalfFuel()
     local count = turtle.getItemCount(slot)
     if count > 0 and turtle.refuel(0) then
       local giveCount = math.floor(count / 2)
-      if giveCount > 0 and turtle.drop(giveCount) then
+      if giveCount > 0 and drop(giveCount) then
         dropped = dropped + giveCount
       end
     end
@@ -127,17 +132,32 @@ local function giveHalfFuel()
   return dropped
 end
 
--- Turns to face whichever of the 4 horizontal neighbors is a
--- ComputerCraft block -- the stranded turtle is assumed to be
--- immediately adjacent to the pathfind target above. Returns true once
--- facing it, false if none of the 4 sides is one.
+-- Finds whichever of the stranded turtle's 6 neighbors is a
+-- ComputerCraft block -- pathfind.goto's tolerance=1 approach (see
+-- M.perform() below) only guarantees Euclidean distance <=1, which is
+-- satisfied just as easily by landing directly above/below it as beside
+-- it -- lib/pathfind.lua's y-first movement preference (see its own
+-- header comment) actually makes landing above/below the MORE common
+-- case now, not a rare edge case, so checking only the 4 horizontal
+-- sides (an earlier version of this function) missed it routinely --
+-- confirmed live: a rescuer reaching the area, standing directly above
+-- the stranded turtle, and reporting "no turtle is adjacent" every
+-- time, no fuel ever delivered. Checks up/down first (no turning
+-- needed, cheap), then the 4 horizontal sides. Returns the direction
+-- ("up", "down", or "front", already facing it for "front") it was
+-- found in, or nil if none of the 6 is one.
 local function faceStrandedTurtle()
+  local foundUp, upData = turtle.inspectUp()
+  if foundUp and nav.isComputerCraftBlock(upData.name) then return "up" end
+  local foundDown, downData = turtle.inspectDown()
+  if foundDown and nav.isComputerCraftBlock(downData.name) then return "down" end
+
   for _ = 1, 4 do
     local found, data = turtle.inspect()
-    if found and nav.isComputerCraftBlock(data.name) then return true end
+    if found and nav.isComputerCraftBlock(data.name) then return "front" end
     nav.turnRight()
   end
-  return false
+  return nil
 end
 
 -- Performs a full rescue. Returns true, message on success, or false,
@@ -192,11 +212,12 @@ function M.perform(strandedX, strandedY, strandedZ, chestX, chestY, chestZ)
   if not reached then
     return false, "could not reach stranded turtle: " .. tostring(info and info.reason)
   end
-  if not faceStrandedTurtle() then
+  local strandedDirection = faceStrandedTurtle()
+  if not strandedDirection then
     return false, "reached the area but no turtle is adjacent"
   end
 
-  local dropped = giveHalfFuel()
+  local dropped = giveHalfFuel(strandedDirection)
 
   local backReached = pathfind.goto(pausedPos.x, pausedPos.y, pausedPos.z, { tolerance = 0, allowDig = "safe" })
   if not backReached then
