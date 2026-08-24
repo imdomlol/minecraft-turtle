@@ -749,6 +749,22 @@ function M.run(params, shouldStop)
   end
 
   local resume = params.__resume
+  -- Cleared right after reading, not left sitting in params: params IS
+  -- lib/job.lua's own current.params (M.request() stores it by
+  -- reference, no copy), and every job.checkpoint() call below embeds
+  -- that same current.params alongside a fresh checkpoint table. Below,
+  -- columnStart is seeded from resume.columnStart BY REFERENCE (not
+  -- copied) when resuming -- if params.__resume were still set, that
+  -- exact same columnStart table would end up reachable from BOTH
+  -- current.params.__resume.columnStart AND the new checkpoint's own
+  -- columnStart field in the one structure textutils.serializeJSON()
+  -- has to encode, which CC:Tweaked refuses ("Cannot serialize table
+  -- with repeated entries") -- confirmed live: every checkpoint save
+  -- after a resume crashed the job this way, exactly the scenario this
+  -- session's fuel-rescue/reboot testing kept triggering. __resume is a
+  -- one-time seed for this function's own local state below, never
+  -- meant to persist as ongoing job params.
+  params.__resume = nil
 
   if not home.get() then home.mark() end
 
