@@ -513,12 +513,20 @@ local function unloadIfFull(tidy, chestPos)
       break
     end
 
-    local emptied = inventory.dropAll(found.direction)
-    totalEmptied = totalEmptied + emptied
+    local chestEmptied = 0
+    while not inventory.isEmpty() do
+      local emptied = inventory.dropAll(found.direction)
+      if emptied == 0 then break end
+      chestEmptied = chestEmptied + emptied
+      totalEmptied = totalEmptied + emptied
+    end
+
     chestsUsed = chestsUsed + 1
     print(("vertical: unloaded %d slot(s) into chest at (%d, %d, %d)")
-      :format(emptied, found.x, found.y, found.z))
-    tried[chestfinder.posKey(found.x, found.y, found.z)] = true
+      :format(chestEmptied, found.x, found.y, found.z))
+    if not inventory.isEmpty() then
+      tried[chestfinder.posKey(found.x, found.y, found.z)] = true
+    end
   end
 
   if chestsUsed > 1 then
