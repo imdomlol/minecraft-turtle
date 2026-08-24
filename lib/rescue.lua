@@ -23,6 +23,7 @@ local pathfind = dofile("/lib/pathfind.lua")
 local job = dofile("/lib/job.lua")
 local fuel = dofile("/lib/fuel.lua")
 local chestfinder = dofile("/lib/chestfinder.lua")
+local inventory = dofile("/lib/inventory.lua")
 
 local M = {}
 
@@ -40,10 +41,12 @@ local M = {}
 -- behavior, timing out here means ABORTING the rescue, never proceeding
 -- with movement while the job might still be running.
 local PAUSE_WAIT_TIMEOUT = 180
--- Bounds how many items to pull from the chest hunting for fuel --
--- mirrors dom-main/mining/vertical.lua's own MAX_CHESTS_PER_UNLOAD-style
--- philosophy of every retry loop in this codebase having an explicit cap.
-local MAX_FUEL_GRAB_ATTEMPTS = 16
+-- Bounds how many different chests to try while hunting for a fuel stack
+-- in a mixed worksite storage area. A turtle cannot ask turtle.suck()
+-- for "coal"; it can only pull whatever stack the inventory exposes
+-- first. If a chest's first extractable stack is stone/cobble/etc,
+-- pulling and dropping it back can otherwise hit that same stack forever.
+local MAX_FUEL_CHESTS = 8
 
 -- Requests a stop on whatever job is currently running (if any) and
 -- waits (bounded) for it to actually reach idle, so the rescue trip
@@ -67,43 +70,73 @@ local function pauseCurrentJob()
   return job.status().current == "idle", name, params
 end
 
--- Sucks up to maxAttempts items out of whatever's in `direction`,
--- keeping only ones that pass turtle.refuel(0)'s dry-run fuel check and
--- putting anything else straight back -- the chest this runs against is
--- also where mined-out ore gets dropped off (dom-main/controller/
--- worksite.lua's M.chest()), so nothing here should walk off with
--- someone else's ore while hunting for fuel. Returns how many fuel
--- items were kept.
-local function grabFuelItems(direction, maxAttempts)
-  local inspect, suck, dropFn = turtle.inspect, turtle.suck, turtle.drop
-  if direction == "up" then inspect, suck, dropFn = turtle.inspectUp, turtle.suckUp, turtle.dropUp
-  elseif direction == "down" then inspect, suck, dropFn = turtle.inspectDown, turtle.suckDown, turtle.dropDown end
+local function suckFn(direction)
+  if direction == "up" then return turtle.suckUp end
+  if direction == "down" then return turtle.suckDown end
+  return turtle.suck
+end
 
-  local found, data = inspect()
-  if not (found and data.name and data.name:lower():find("chest", 1, true)) then return 0 end
+local function dropFn(direction)
+  if direction == "up" then return turtle.dropUp end
+  if direction == "down" then return turtle.dropDown end
+  return turtle.drop
+end
 
-  local originalSlot = turtle.getSelectedSlot()
-  local kept = 0
-  for _ = 1, maxAttempts do
-    local before = {}
-    for slot = 1, 16 do before[slot] = turtle.getItemCount(slot) end
-    if not suck() then break end
+local function firstNonEmptySlot()
+  for slot = 1, 16 do
+    if turtle.getItemCount(slot) > 0 then return slot end
+  end
+  return nil
+end
 
-    for slot = 1, 16 do
-      local pulled = turtle.getItemCount(slot) - before[slot]
-      if pulled > 0 then
-        turtle.select(slot)
-        if turtle.refuel(0) then
-          kept = kept + pulled
-        else
-          dropFn(pulled)
+local function topUpFromSelectedStack(minLevel)
+  if fuel.hasFuel(minLevel) then return true end
+  if not turtle.refuel(0) then return false end
+  while not fuel.hasFuel(minLevel) and turtle.getItemCount() > 0 do
+    if not turtle.refuel(1) then break end
+  end
+  return fuel.hasFuel(minLevel)
+end
+
+-- Finds a nearby chest whose first extractable stack is fuel. At each
+-- candidate chest, dump everything first so the rescuer has room for one
+-- pulled stack, pull exactly one stack, and dry-run it with refuel(0).
+-- Non-fuel stacks are put back and that chest is excluded before trying
+-- another chest. On success the fuel stack stays in inventory for the
+-- rescue; the selected slot is left on that stack so the caller can
+-- consume only as much as needed for its own tank before donating the
+-- rest.
+local function takeOneFuelStack(chestX, chestY, chestZ)
+  local excluded = {}
+  for _ = 1, MAX_FUEL_CHESTS do
+    local chest, chestErr = chestfinder.find({
+      x = chestX, y = chestY, z = chestZ,
+      exclude = excluded,
+    })
+    if not chest then return nil, "could not find a fuel chest: " .. tostring(chestErr) end
+
+    inventory.dropAll(chest.direction)
+    if not inventory.isEmpty() then
+      excluded[chestfinder.posKey(chest.x, chest.y, chest.z)] = true
+    else
+      local suck = suckFn(chest.direction)
+      local drop = dropFn(chest.direction)
+      if not suck() then
+        excluded[chestfinder.posKey(chest.x, chest.y, chest.z)] = true
+      else
+        local slot = firstNonEmptySlot()
+        if slot then
+          turtle.select(slot)
+          if turtle.refuel(0) then
+            return chest, slot
+          end
+          drop()
         end
-        break
+        excluded[chestfinder.posKey(chest.x, chest.y, chest.z)] = true
       end
     end
   end
-  turtle.select(originalSlot)
-  return kept
+  return nil, "no fuel stack found after checking " .. MAX_FUEL_CHESTS .. " chest(s)"
 end
 
 -- Drops half of every fuel-type stack currently carried, in the given
@@ -180,33 +213,19 @@ function M.perform(strandedX, strandedY, strandedZ, chestX, chestY, chestZ)
       .. "s -- aborting rather than risk moving the turtle while it might still be running"
   end
 
-  local chest, chestErr = chestfinder.find({ x = chestX, y = chestY, z = chestZ })
+  local chest, chestErr = takeOneFuelStack(chestX, chestY, chestZ)
   if not chest then
     return false, "could not reach the chest to fetch fuel: " .. tostring(chestErr)
   end
 
-  -- Refuel the rescuer's OWN tank first, before grabbing anything extra
-  -- to hand over -- CC:Tweaked's turtle.refuel() with no count argument
-  -- consumes an ENTIRE stack from the selected slot, not "just enough";
-  -- grabFuelItems() below merges everything it pulls into one stack, so
-  -- calling ensureFuel() AFTER that could burn the whole donation in one
-  -- shot reaching a modest target, leaving nothing left to give away
-  -- (caught by this file's own test). Ensuring the rescuer's own need is
-  -- met first, from whatever's already on hand or pulled fresh from the
-  -- chest, means anything grabbed afterward is genuine surplus, safe to
-  -- keep entirely as portable items.
-  --
   -- 2x the direct chest<->stranded-turtle distance -- comfortably covers
   -- getting there and back, same convention as lib/fuel.lua's own
   -- M.safeReturnFuel() everywhere else it's used.
   local refuelTarget = fuel.safeReturnFuel(
     { x = chestX, y = chestY, z = chestZ }, { x = strandedX, y = strandedY, z = strandedZ })
-  local fuelOk, fuelErr = fuel.ensureFuel(refuelTarget)
-  if not fuelOk then
-    return false, "couldn't reach a safe fuel level at the chest: " .. tostring(fuelErr)
+  if not topUpFromSelectedStack(refuelTarget) then
+    return false, "found fuel, but not enough to reach a safe fuel level at the chest"
   end
-
-  grabFuelItems(chest.direction, MAX_FUEL_GRAB_ATTEMPTS)
 
   local reached, info = pathfind.goto(strandedX, strandedY, strandedZ, { tolerance = 1, allowDig = "safe" })
   if not reached then
