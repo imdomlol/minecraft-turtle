@@ -432,14 +432,23 @@ local MAX_CHESTS_PER_UNLOAD = 20
 -- that's still full would just immediately re-"find" that exact same
 -- one forever, never reaching a different chest.
 --
+-- Keeps searching (see the loop's own inventory.isEmpty() condition,
+-- not just "not full anymore") until every slot is actually empty, or
+-- it genuinely runs out of chests to try -- which is only a failure if
+-- NOTHING could be unloaded at all; having emptied at least one chest
+-- before running dry is treated as success, continuing to mine with
+-- whatever room was freed up rather than stopping the whole job over a
+-- chest area that's just smaller than one full load.
+--
 -- Returns to the exact position/heading this was called from once
 -- done -- NOT necessarily a pass's own start; this is also called after
 -- every leg step (see digForward below), not just once per pass, so a
 -- full inventory gets caught within a single leg instead of potentially
 -- waiting out an entire deep pass. Returns true (whether or not
--- anything actually needed unloading), or false, reason if no (further)
--- chest could be found (or tidy is off), or if the turtle couldn't get
--- back to where it was. No shouldStop here either, for the same reason
+-- anything actually needed unloading, and whether or not every slot
+-- ended up empty), or false, reason only if NO chest could be found at
+-- all (or tidy is off), or if the turtle couldn't get back to where it
+-- was. No shouldStop here either, for the same reason
 -- as returnToColumnStart/mineVein's own return-to-origin above -- the
 -- trip back is a recovery step and must finish once started, not be cut
 -- short by a stop request that arrived while it was full.
@@ -465,9 +474,17 @@ local function unloadIfFull(tidy, chestPos)
 
   local tried = {}
   local totalEmptied, chestsUsed = 0, 0
-  while inventory.isFull() do
+  -- inventory.isEmpty(), not isFull() -- "no longer completely full"
+  -- (even a single slot freed up) is not the same as "actually unloaded
+  -- everything", confirmed live: a turtle whose first chest only had
+  -- room for 2 of 16 slots stopped right there and went back to mining
+  -- still 14/16 full. Keeps going until every slot is empty, or one of
+  -- the two "genuinely nowhere left to try" cases below is hit.
+  while not inventory.isEmpty() do
     if chestsUsed >= MAX_CHESTS_PER_UNLOAD then
-      return false, "inventory still full after trying " .. chestsUsed .. " chest(s) in the area"
+      print("vertical: hit the " .. MAX_CHESTS_PER_UNLOAD
+        .. "-chest safety cap with items still left -- continuing with whatever room was freed up")
+      break
     end
 
     local searchOpts = { exclude = tried }
@@ -476,11 +493,20 @@ local function unloadIfFull(tidy, chestPos)
     end
     local found, reason = chestfinder.find(searchOpts)
     if not found then
-      if chestsUsed > 0 then
-        return false, "inventory full, no more chests found nearby after using " .. chestsUsed
-          .. ": " .. tostring(reason)
+      -- Zero progress at all (not even one usable chest) is still a
+      -- hard failure -- a genuinely broken/missing chest setup deserves
+      -- stopping the job so it gets noticed, not silently mining on
+      -- with a completely full inventory that will just re-trigger this
+      -- exact same doomed search on the very next block. But SOME
+      -- progress (this area's chests are just smaller than one load) is
+      -- a normal, expected outcome -- stop searching, keep the room
+      -- that was freed up, and get back to work.
+      if chestsUsed == 0 then
+        return false, "inventory full, no chest found: " .. tostring(reason)
       end
-      return false, "inventory full, no chest found: " .. tostring(reason)
+      print("vertical: no more chests found nearby after using " .. chestsUsed
+        .. " -- continuing with whatever room was freed up")
+      break
     end
 
     local emptied = inventory.dropAll(found.direction)

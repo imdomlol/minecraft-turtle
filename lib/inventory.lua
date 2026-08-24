@@ -27,6 +27,17 @@ function M.isFull()
   return M.emptySlotCount() == 0
 end
 
+-- True once every slot is empty -- NOT just "not full anymore" (even
+-- one freed slot satisfies that). dom-main/mining/vertical.lua's own
+-- unloadIfFull() keeps searching for more chests until this is true (or
+-- it genuinely runs out of chests to try) -- confirmed live: stopping
+-- the moment the inventory was merely no longer completely full left a
+-- turtle heading back to mining with 14 of 16 slots still full, after
+-- the first chest it found only had room for 2.
+function M.isEmpty()
+  return M.emptySlotCount() == SLOTS
+end
+
 -- Every nonempty slot as { slot, name, count }, in slot order.
 function M.here()
   local items = {}
