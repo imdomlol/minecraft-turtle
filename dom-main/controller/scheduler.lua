@@ -59,11 +59,15 @@ local TICK_INTERVAL           = 5   -- seconds between scheduler passes
 -- not the primary judgment call whenever that info is available.
 local STRANDED_FUEL_THRESHOLD = 20
 local DISPATCH_TIMEOUT        = 300 -- seconds -- generous: a fresh/idle turtle's origin could be far away
--- Generous like DISPATCH_TIMEOUT above, not the old flat 120: lib/rescue.lua's
--- trip now includes waiting (bounded, up to 30s) for a mining rescuer's
--- job to actually pause, plus a stop at the chest before ever reaching
--- the stranded turtle -- a longer round trip than the old direct-to-target dispatch.
-local RESCUE_TIMEOUT          = 300
+-- Generous, well beyond DISPATCH_TIMEOUT above: lib/rescue.lua's trip
+-- now includes waiting (bounded, up to 180s -- a full mining leg's
+-- worth of real dig/move time, see its own PAUSE_WAIT_TIMEOUT comment)
+-- for a mining rescuer's job to actually pause, PLUS a stop at the
+-- chest before ever reaching the stranded turtle -- a much longer round
+-- trip than the old direct-to-target dispatch. Must comfortably exceed
+-- that 180s pause-wait on its own, with real room left over for the
+-- actual travel.
+local RESCUE_TIMEOUT          = 600
 local REFUEL_TIMEOUT          = 30
 local REFUEL_TRIP_TIMEOUT     = 120
 

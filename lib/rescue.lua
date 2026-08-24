@@ -26,12 +26,20 @@ local chestfinder = dofile("/lib/chestfinder.lua")
 
 local M = {}
 
--- shouldStop() (what job.stop() actually sets) is only checked between
--- steps, not instantly -- see dom-main/mining/vertical.lua's own header
--- comment ("expect up to roughly a length block actions' worth of
--- latency"). This bounds how long to wait for that to actually happen
--- before giving up and proceeding with the rescue anyway.
-local PAUSE_WAIT_TIMEOUT = 30
+-- shouldStop() (what job.stop() actually sets) is only checked once per
+-- completed stepDown+leg+turn cycle, not instantly -- dom-main/mining/
+-- vertical.lua's digColumn() only checks it at the top of that cycle,
+-- so the wait can genuinely span a full stepDown (up to `stepDown`
+-- blocks) plus a full leg (up to `length` blocks, routinely 20+) of
+-- real dig/move/scan time -- comfortably over a minute on a real
+-- server, confirmed live (a 30s bound here let a rescue start walking
+-- the turtle toward the chest while mine_vertical's own coroutine was
+-- STILL running and could still move it too -- two things driving the
+-- same turtle at once). This bounds how long to wait before giving up
+-- -- see M.perform()'s own use of the return value: unlike the old
+-- behavior, timing out here means ABORTING the rescue, never proceeding
+-- with movement while the job might still be running.
+local PAUSE_WAIT_TIMEOUT = 180
 -- Bounds how many items to pull from the chest hunting for fuel --
 -- mirrors dom-main/mining/vertical.lua's own MAX_CHESTS_PER_UNLOAD-style
 -- philosophy of every retry loop in this codebase having an explicit cap.
@@ -39,12 +47,15 @@ local MAX_FUEL_GRAB_ATTEMPTS = 16
 
 -- Requests a stop on whatever job is currently running (if any) and
 -- waits (bounded) for it to actually reach idle, so the rescue trip
--- below doesn't start while the turtle's still mid-leg. Returns the job
--- name/params to resume afterward, or nil, nil if it was already idle
--- (nothing to pause).
+-- below never starts moving the turtle while mine_vertical's own
+-- coroutine might still be running and moving it too. Returns paused
+-- (true if it was already idle, or actually reached idle in time; false
+-- if it never did -- the caller MUST abort without moving anything in
+-- that case, not proceed anyway), and the job name/params to resume
+-- afterward (nil, nil if it was already idle -- nothing to pause).
 local function pauseCurrentJob()
   local status = job.status()
-  if status.current == "idle" then return nil, nil end
+  if status.current == "idle" then return true, nil, nil end
 
   local name, params = status.current, status.params
   job.stop()
@@ -53,10 +64,7 @@ local function pauseCurrentJob()
     sleep(1)
     waited = waited + 1
   end
-  if job.status().current ~= "idle" then
-    print("rescue: job didn't go idle within " .. PAUSE_WAIT_TIMEOUT .. "s -- proceeding with the rescue anyway")
-  end
-  return name, params
+  return job.status().current == "idle", name, params
 end
 
 -- Sucks up to maxAttempts items out of whatever's in `direction`,
@@ -139,7 +147,18 @@ end
 -- wrong position.
 function M.perform(strandedX, strandedY, strandedZ, chestX, chestY, chestZ)
   local pausedPos = nav.getPosition()
-  local resumeName, resumeParams = pauseCurrentJob()
+  local paused, resumeName, resumeParams = pauseCurrentJob()
+  if not paused then
+    -- Never move the turtle here -- mine_vertical's own coroutine may
+    -- still be actively running and moving it too. The job's own stop
+    -- request (already sent by pauseCurrentJob() above) stays pending
+    -- and will still take effect on its own; this rescue attempt simply
+    -- didn't get there in time and needs to be retried (the scheduler's
+    -- next tick will see this turtle is still stranded and try again,
+    -- hopefully against a rescuer that's actually free by then).
+    return false, "job (" .. tostring(resumeName) .. ") did not pause within " .. PAUSE_WAIT_TIMEOUT
+      .. "s -- aborting rather than risk moving the turtle while it might still be running"
+  end
 
   local chest, chestErr = chestfinder.find({ x = chestX, y = chestY, z = chestZ })
   if not chest then
