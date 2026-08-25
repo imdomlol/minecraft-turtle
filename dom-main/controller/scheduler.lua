@@ -107,8 +107,27 @@ function M.isIdle(entry)
   return entry.job ~= nil and entry.job.current == "idle"
 end
 
-local function miningFuelBudget(entry)
+-- `name` (optional) lets this peek at the turtle's ACTUAL prospective
+-- cell (worksite.assignCell() is idempotent/sticky -- safe to call
+-- speculatively, it never reassigns an existing turtle or hands out a
+-- cell that isn't really about to be theirs) whenever entry.job.params
+-- doesn't have a real length yet (idle, about to be freshly assigned,
+-- or between passes -- job.lua's status() always reports params={}
+-- while idle, regardless of what the last job actually used). Confirmed
+-- live: without this, a turtle whose fuel was enough for the flat
+-- MINE_DEFAULT_LENGTH estimate but not a zone's actual (longer) cell
+-- length slipped through M.needsSelfRefuel() here, got dispatched to
+-- mine anyway, and immediately self-stopped the instant dom-main/
+-- mining/vertical.lua recomputed the real floor with the real length --
+-- then got redispatched into the identical failure forever, since every
+-- later tick's estimate was still wrong the same way (idle always
+-- resets params to {}, so the mismatch never self-corrected).
+local function miningFuelBudget(entry, name)
   local params = entry.job and entry.job.params or {}
+  if not params.length and name then
+    local cell = worksite.assignCell(name)
+    if cell then params = worksite.jobFor(cell).params end
+  end
   local length = params.length or MINE_DEFAULT_LENGTH
   local observant = params.observant
   if observant == nil then observant = MINE_DEFAULT_OBSERVANT end
@@ -119,8 +138,8 @@ local function miningFuelBudget(entry)
   return length + stepDown + (thorough and MINE_MAX_VEIN_BLOCKS or 0)
 end
 
-local function selfRefuelTarget(entry, chest)
-  return fuel.safeReturnFuel(entry.position, chest) + miningFuelBudget(entry)
+local function selfRefuelTarget(entry, chest, name)
+  return fuel.safeReturnFuel(entry.position, chest) + miningFuelBudget(entry, name)
 end
 
 local function hasInventoryFuel(entry)
@@ -164,13 +183,13 @@ end
 -- and no attempt to send it to refuel either. Cheaper than a full
 -- rescue -- no second turtle tied up -- since it can get there itself;
 -- see M.dispatchToChest() below.
-function M.needsSelfRefuel(entry)
+function M.needsSelfRefuel(entry, name)
   if type(entry.fuel) ~= "number" then return false end
   if not M.hasKnownPosition(entry) then return false end
   local chest = worksite.nearestChest(entry.position)
   if not chest then return false end
   if M.isStranded(entry) then return false end
-  return entry.fuel < selfRefuelTarget(entry, chest)
+  return entry.fuel < selfRefuelTarget(entry, chest, name)
 end
 
 -- False for a turtle whose reported position isn't anchored to the real
@@ -313,7 +332,7 @@ function M.attemptRescue(strandedName, strandedEntry, rescuerName)
   -- against the now-dynamic floor it would routinely leave the turtle
   -- still below what mine_vertical needs, hitting the identical
   -- "insufficient fuel" stop again the moment it resumed.
-  local refuelTarget = chest and selfRefuelTarget(strandedEntry, chest) or 1
+  local refuelTarget = chest and selfRefuelTarget(strandedEntry, chest, strandedName) or 1
   local refuelOk, refuelOutput = roster.proxy(strandedName,
     "local ok, reason = dofile(\"/lib/fuel.lua\").ensureFuel(" .. refuelTarget .. "); "
       .. "if not ok then error(tostring(reason), 0) end; "
@@ -340,7 +359,7 @@ end
 -- up if there is one, same as a real rescue does).
 function M.dispatchToChest(name, entry)
   local chest = worksite.nearestChest(entry.position)
-  local target = selfRefuelTarget(entry, chest)
+  local target = selfRefuelTarget(entry, chest, name)
   print("scheduler: sending " .. name .. " to the chest to refuel (enough to get there, not enough to keep mining safely)")
 
   local command = string.format(
@@ -370,7 +389,7 @@ end
 -- own return trip.
 function M.refuelFromInventory(name, entry)
   local chest = M.hasKnownPosition(entry) and worksite.nearestChest(entry.position)
-  local target = chest and selfRefuelTarget(entry, chest) or 1
+  local target = chest and selfRefuelTarget(entry, chest, name) or 1
   print("scheduler: " .. name .. " is stranded but has fuel items -- trying inventory refuel before rescue")
   local ok, output = roster.proxy(name,
     "local ok, reason = dofile(\"/lib/fuel.lua\").ensureFuel(" .. target .. "); "
@@ -476,7 +495,7 @@ function M.tick()
     if entry and not dispatched[name] and M.isIdle(entry) then
       if not M.hasKnownPosition(entry) then
         print("scheduler: " .. name .. " is idle but has no reliable position -- needs a manual `setpos` before autopilot will dispatch it")
-      elseif M.needsSelfRefuel(entry) then
+      elseif M.needsSelfRefuel(entry, name) then
         tasks[#tasks + 1] = function() M.dispatchToChest(name, entry) end
       else
         tasks[#tasks + 1] = function() M.assignWork(name) end
