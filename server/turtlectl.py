@@ -22,15 +22,20 @@ Usage:
                                        into one, and always drops this console's own
                                        connect()/disconnect() heartbeat noise; --silent
                                        additionally drops routine per-block "spotted" noise,
-                                       short pathfind hops, and truncates long raw command
-                                       echoes)
+                                       short pathfind hops, and raw command echoes -- an
+                                       autopilot dispatch (e.g. starting a mining job) is
+                                       translated to a plain sentence instead of dropped)
   turtlectl.py roster <controller>    -- every turtle this controller currently knows about
   turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
   turtlectl.py mode <controller> [idle|passive|aggressive]  -- get or set the autopilot mode
   turtlectl.py version <controller> [N] [--bump]  -- get or set the controller's code version
-  turtlectl.py worksite <controller> [minX minZ maxX maxZ y chestX chestY chestZ capacity]
-                         -- get (no args) or set the current mining worksite
+  turtlectl.py worksite <controller> [minX minZ maxX maxZ y capacity]
+                         -- get (no args) or set the current mining worksite's bounds/height/capacity
+  turtlectl.py addchest <controller> <x> <y> <z> [maxX maxY maxZ]
+                         -- add a chest location (or, with maxX/Y/Z, a range) turtles can unload/refuel at
+  turtlectl.py removechest <controller> <index>  -- remove a configured chest (see `chests` for its index)
+  turtlectl.py chests <controller>    -- list every configured chest location/range
   turtlectl.py worldexport <controller> [outfile]  -- pull the whole recorded world map to a
                          local JSON file (default: world_export.json), for an external viewer
   turtlectl.py worldwatch <controller> [jsonfile]  -- live-tail newly-observed blocks: NDJSON
@@ -489,18 +494,33 @@ def build_shortcut(cmd, ns):
         return "current version", 'return dofile("/dom-main/controller/version.lua").get()'
 
     if cmd == "worksite":
-        fields = [ns.minX, ns.minZ, ns.maxX, ns.maxZ, ns.y, ns.chestX, ns.chestY, ns.chestZ, ns.capacity]
+        fields = [ns.minX, ns.minZ, ns.maxX, ns.maxZ, ns.y, ns.capacity]
         if all(f is None for f in fields):
             return "current worksite", 'return dofile("/dom-main/controller/worksite.lua").get()'
         if any(f is None for f in fields):
-            print("error: worksite needs all of minX minZ maxX maxZ y chestX chestY chestZ capacity, "
+            print("error: worksite needs all of minX minZ maxX maxZ y capacity, "
                   "or none of them (to just view it)", file=sys.stderr)
             sys.exit(1)
         args_str = ", ".join(str(f) for f in fields)
         command = f'return dofile("/dom-main/controller/worksite.lua").set({args_str})'
-        description = (f"set worksite ({ns.minX},{ns.minZ})-({ns.maxX},{ns.maxZ}) y={ns.y} "
-                        f"chest=({ns.chestX},{ns.chestY},{ns.chestZ}) capacity={ns.capacity}")
+        description = f"set worksite ({ns.minX},{ns.minZ})-({ns.maxX},{ns.maxZ}) y={ns.y} capacity={ns.capacity}"
         return description, command
+
+    if cmd == "addchest":
+        fields = [ns.x, ns.y, ns.z, ns.maxX, ns.maxY, ns.maxZ]
+        args_str = ", ".join("nil" if f is None else str(f) for f in fields)
+        command = f'return dofile("/dom-main/controller/worksite.lua").addChest({args_str})'
+        if ns.maxX is None and ns.maxY is None and ns.maxZ is None:
+            description = f"add chest at ({ns.x},{ns.y},{ns.z})"
+        else:
+            description = f"add chest range ({ns.x},{ns.y},{ns.z})-({ns.maxX},{ns.maxY},{ns.maxZ})"
+        return description, command
+
+    if cmd == "removechest":
+        return f"remove chest #{ns.index}", f'return dofile("/dom-main/controller/worksite.lua").removeChest({ns.index})'
+
+    if cmd == "chests":
+        return "configured chests", 'return dofile("/dom-main/controller/worksite.lua").listChests()'
 
     if cmd == "gpshost":
         if ns.x is not None and ns.y is not None and ns.z is not None:
@@ -518,7 +538,7 @@ TURTLE_SHORTCUTS = {
     "goto", "mine", "stop", "jobstatus", "pos", "setpos", "gpsfix", "turnleft", "turnright",
     "inv", "home", "markhome", "findchest", "dump",
 }
-CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode", "version", "worksite", "gpshost"}
+CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode", "version", "worksite", "addchest", "removechest", "chests", "gpshost"}
 # whoami is the one shortcut where <turtle> is optional -- see its
 # build_shortcut() branch and the unified dispatch below, which proxies
 # to a turtle whenever one was given rather than checking set membership.
@@ -641,8 +661,21 @@ def build_console_parser():
     verp.add_argument("--bump", action="store_true")
 
     wsp = sub.add_parser("worksite", add_help=False)
-    for name in ("minX", "minZ", "maxX", "maxZ", "y", "chestX", "chestY", "chestZ", "capacity"):
+    for name in ("minX", "minZ", "maxX", "maxZ", "y", "capacity"):
         wsp.add_argument(name, nargs="?", type=int)
+
+    acp = sub.add_parser("addchest", add_help=False)
+    acp.add_argument("x", type=int)
+    acp.add_argument("y", type=int)
+    acp.add_argument("z", type=int)
+    acp.add_argument("maxX", nargs="?", type=int)
+    acp.add_argument("maxY", nargs="?", type=int)
+    acp.add_argument("maxZ", nargs="?", type=int)
+
+    rcp = sub.add_parser("removechest", add_help=False)
+    rcp.add_argument("index", type=int)
+
+    sub.add_parser("chests", add_help=False)
 
     ghp = sub.add_parser("gpshost", add_help=False)
     ghp.add_argument("x", nargs="?", type=int)
@@ -678,8 +711,11 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   whoami [turtle]                              basic info about the controller, or that turtle if named
   mode [idle|passive|aggressive]               get or set the autopilot mode (omit to just report it)
   version [N] [--bump]                         get or set the controller's manually-tracked code version
-  worksite [minX minZ maxX maxZ y chestX chestY chestZ capacity]
-                                                get (no args) or set the current mining worksite
+  worksite [minX minZ maxX maxZ y capacity]    get (no args) or set the worksite's bounds/height/capacity
+  addchest <x> <y> <z> [maxX maxY maxZ]        add a chest location (or range) to unload/refuel at --
+                                                multiple may be added; the nearest to a turtle is used
+  removechest <index>                          remove a configured chest (see `chests` for its index)
+  chests                                       list every configured chest location/range
   gpshost [x y z]                              get (no args) or set this controller's own GPS anchor position
   help                                         show this list
 
@@ -827,18 +863,38 @@ def main():
     verp.add_argument("--bump", action="store_true", help="Increment the current version by 1.")
 
     wsp = sub.add_parser("worksite", parents=[waitp],
-                          help="Get or set the current mining worksite (bounds + chest location).")
+                          help="Get or set the current mining worksite's bounds/height/capacity. "
+                               "Chest locations are managed separately -- see addchest/removechest/chests.")
     wsp.add_argument("controller")
-    wsp.add_argument("minX", nargs="?", type=int, help="Omit all 9 of minX..capacity to just view the current worksite.")
+    wsp.add_argument("minX", nargs="?", type=int, help="Omit all 6 of minX..capacity to just view the current worksite.")
     wsp.add_argument("minZ", nargs="?", type=int)
     wsp.add_argument("maxX", nargs="?", type=int)
     wsp.add_argument("maxZ", nargs="?", type=int)
     wsp.add_argument("y", nargs="?", type=int, help="Height to start mining passes from.")
-    wsp.add_argument("chestX", nargs="?", type=int, help="Where a full turtle should go to unload.")
-    wsp.add_argument("chestY", nargs="?", type=int)
-    wsp.add_argument("chestZ", nargs="?", type=int)
     wsp.add_argument("capacity", nargs="?", type=int,
                       help="How many non-overlapping cells to divide the site into (one per turtle).")
+
+    acp = sub.add_parser("addchest", parents=[waitp],
+                          help="Add a chest location (or range) a full turtle can unload/refuel at. "
+                               "Multiple chests may be added -- the nearest one to a given turtle is "
+                               "used automatically.")
+    acp.add_argument("controller")
+    acp.add_argument("x", type=int)
+    acp.add_argument("y", type=int)
+    acp.add_argument("z", type=int)
+    acp.add_argument("maxX", nargs="?", type=int,
+                      help="Together with maxY/maxZ, makes this chest a range instead of an exact point -- "
+                           "a chest may be found anywhere within (x,y,z)-(maxX,maxY,maxZ). Omit all three "
+                           "for an exact point.")
+    acp.add_argument("maxY", nargs="?", type=int)
+    acp.add_argument("maxZ", nargs="?", type=int)
+
+    rcp = sub.add_parser("removechest", parents=[waitp], help="Remove a configured chest by its index (see `chests`).")
+    rcp.add_argument("controller")
+    rcp.add_argument("index", type=int)
+
+    cp = sub.add_parser("chests", parents=[waitp], help="List every configured chest location/range.")
+    cp.add_argument("controller")
 
     ghp = sub.add_parser("gpshost", parents=[waitp],
                           help="Get or set this controller's own GPS anchor position "
@@ -1062,9 +1118,15 @@ def main():
         #     "stuck"/"interrupted"/"gave up" are never tagged this way
         #     and always print regardless of distance -- a failure is
         #     worth seeing no matter how short the attempted hop was.
-        #   - a raw command echo ("> ...") once it's clearly a machine-
-        #     generated dispatch rather than something a human typed --
-        #     truncated to MAX_SILENT_ECHO_LENGTH, not dropped outright.
+        #   - a raw command echo ("> ...") with no sender, since that's
+        #     always this console's own submitted command, already shown
+        #     via "[queued N] description" the moment it was sent. A
+        #     SENDER-prefixed echo ("[Name] > ...") is a turtle's own log
+        #     of what it just ran, which is the only visibility into an
+        #     autopilot dispatch (see FRIENDLY_DISPATCH_PATTERNS below) --
+        #     translated to a human sentence when recognized, dropped
+        #     otherwise (an operator's own turtle-targeted command, same
+        #     reasoning as the no-sender case).
         # This console's own connect()/disconnect() heartbeat echoes are
         # dropped unconditionally, --silent or not -- see
         # BOOKKEEPING_ECHOES below.
@@ -1094,13 +1156,56 @@ def main():
             '> dofile("/dom-main/controller/mode.lua").connect()',
             '> dofile("/dom-main/controller/mode.lua").disconnect()',
         })
-        # --silent also truncates (never entirely drops -- still worth
-        # knowing a long command ran, just not at full length) a raw
-        # command echo once it's clearly a machine-generated dispatch
-        # (dom-main/controller/scheduler.lua's assignWork()/rescue
-        # commands routinely run several hundred characters as one
-        # physical line) rather than something a human actually typed.
-        MAX_SILENT_ECHO_LENGTH = 120
+        # lib/nav.lua's M.report() prints "pos:"/"front:"/"up:"/"down:" for
+        # a plain report, or "north:"/"east:"/"south:"/"west:"/"up:"/
+        # "down:" for `pos --full` -- every one of these needs to be here,
+        # or the missing ones get misread as wrap continuations of
+        # whatever line came before them and glued straight onto it
+        # (confirmed: `pos --full` glued all of pos:/north:/east:/south:/
+        # west: into one garbled line before north:/east:/south:/west:
+        # were added below).
+        COMMAND_OUTPUT_PREFIXES = (
+            "pos:", "front:", "up:", "down:", "north:", "east:", "south:", "west:",
+            "inventory:", "slot ", "{", "}", "= ",
+        )
+        # lib/inventory.lua's M.report() ends with a bare "N/16 slots
+        # empty" summary line that -- unlike every other line it prints --
+        # has no stable prefix to match, so it needs its own pattern
+        # rather than a COMMAND_OUTPUT_PREFIXES entry (same bug as the
+        # missing north:/east:/south:/west: above: without this it reads
+        # as a wrap continuation and gets glued onto the last "slot N:
+        # ..." line).
+        SLOTS_SUMMARY_RE = re.compile(r"^\d+/\d+ slots empty$")
+
+        # Recognizes dom-main/controller/scheduler.lua's own fixed command
+        # templates (autopilot dispatches to a turtle -- assignWork/
+        # attemptRescue/dispatchToChest/refuelFromInventory) by a snippet
+        # unique to each, and gives --silent a human sentence to show
+        # instead of either the raw generated Lua or nothing at all. This
+        # is what a scheduler dispatch to a turtle looks like on the wire
+        # -- there's no separate structured "the autopilot did X" event to
+        # read instead, so matching the command text is the only way to
+        # tell it apart from an operator's own turtle-targeted command
+        # (which the console already announced via "[queued N]
+        # description (turtle X)" the moment it was submitted -- see
+        # is_noisy_content's "> " handling in emit() below for why THOSE
+        # stay dropped, not translated). If a scheduler command's own
+        # template ever changes, update the matching pattern here too.
+        FRIENDLY_DISPATCH_PATTERNS = (
+            (lambda cmd: "job.loadCheckpoint()" in cmd, "Controller started a mining job on {turtle}"),
+            (lambda cmd: cmd.startswith('return dofile("/lib/rescue.lua").perform('),
+             "Controller sent {turtle} to rescue a stranded turtle"),
+            (lambda cmd: cmd.startswith('local chestfinder = dofile("/lib/chestfinder.lua")'),
+             "Controller sent {turtle} to refuel at the chest"),
+            (lambda cmd: cmd.startswith('local ok, reason = dofile("/lib/fuel.lua").ensureFuel('),
+             "Controller told {turtle} to refuel"),
+        )
+
+        def friendly_dispatch(turtle, inner_command):
+            for matches, template in FRIENDLY_DISPATCH_PATTERNS:
+                if matches(inner_command):
+                    return template.format(turtle=turtle)
+            return None
 
         def is_noisy_content(content):
             if content.startswith("vertical: spotted "):
@@ -1110,14 +1215,37 @@ def main():
                 return True
             return False
 
+        def is_wrap_continuation(content):
+            if content.startswith((" ", "\t")):
+                return False
+            if SLOTS_SUMMARY_RE.match(content):
+                return False
+            return not content.startswith(KNOWN_MESSAGE_PREFIXES + COMMAND_OUTPUT_PREFIXES)
+
         def emit(sender, content):
             if content in BOOKKEEPING_ECHOES:
                 return
-            if args.silent:
-                if is_noisy_content(content):
+            if args.silent and content.startswith("> "):
+                # A bare (no sender) echo is always this console's own
+                # submitted command, round-tripped through the
+                # controller's exec.lua -- already announced via
+                # "[queued N] description" the moment it was sent, so the
+                # raw Lua adds nothing. A sender-prefixed echo is a
+                # TURTLE's own log of the command it just ran, which is
+                # the only place an autopilot dispatch (never announced by
+                # this console -- it wasn't typed here) is visible at all;
+                # translate the recognizable ones, drop the rest (an
+                # operator's own turtle-targeted command, already
+                # announced the same way as the bare case).
+                if sender is None:
                     return
-                if content.startswith("> ") and len(content) > MAX_SILENT_ECHO_LENGTH:
-                    content = content[:MAX_SILENT_ECHO_LENGTH] + f"... [{len(content)} chars total]"
+                friendly = friendly_dispatch(sender, content[2:])
+                if friendly is None:
+                    return
+                sys.stdout.write(friendly + "\n")
+                return
+            if args.silent and is_noisy_content(content):
+                return
             prefix = f"[{sender}] " if sender is not None else ""
             sys.stdout.write(prefix + content + "\n")
 
@@ -1142,7 +1270,7 @@ def main():
                 sender, content = None, line
                 flush_others(sender)
 
-            if sender in in_progress and not content.startswith(KNOWN_MESSAGE_PREFIXES):
+            if sender in in_progress and is_wrap_continuation(content):
                 in_progress[sender] += content
                 return
             flush(sender)

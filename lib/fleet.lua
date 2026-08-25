@@ -117,6 +117,7 @@ local function sendHeartbeat(ident, controllerId)
     fuelItems = fuel.spareFuelItems(),
     position = nav.getPosition(),
     job = job.status(),
+    uptime = os.clock(),
   }, PROTOCOL)
 end
 

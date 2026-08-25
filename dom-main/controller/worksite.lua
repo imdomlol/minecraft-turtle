@@ -95,9 +95,12 @@ local function buildCells(minX, maxX, minZ, maxZ, capacity)
 end
 
 -- minX/minZ/maxX/maxZ: the site's horizontal bounds (either corner
--- order works). y: height to start mining passes from. chestX/Y/Z:
--- where a full turtle should go to unload. capacity: how many cells to
--- divide the site into.
+-- order works). y: height to start mining passes from. capacity: how
+-- many cells to divide the site into. Chest locations are managed
+-- separately -- see M.addChest()/M.removeChest()/M.listChests()/
+-- M.nearestChest() below -- and, once set, survive a later M.set() call
+-- that only touches bounds/y/capacity (e.g. widening the site or
+-- changing turtle count shouldn't force re-entering every chest).
 --
 -- Refuses (returns nil, reason -- doesn't change the current worksite)
 -- a capacity that would produce any cell narrower than MIN_CELL_SIZE in
@@ -109,7 +112,7 @@ end
 -- capacities put *every* cell outside). Checking every cell rather than
 -- just the nominal cellW/cellD, since the last row/column can come out
 -- smaller than the rest (see buildCells()'s own maxX/maxZ clamp).
-function M.set(minX, minZ, maxX, maxZ, y, chestX, chestY, chestZ, capacity)
+function M.set(minX, minZ, maxX, maxZ, y, capacity)
   local loX, hiX = math.min(minX, maxX), math.max(minX, maxX)
   local loZ, hiZ = math.min(minZ, maxZ), math.max(minZ, maxZ)
 
@@ -122,9 +125,10 @@ function M.set(minX, minZ, maxX, maxZ, y, chestX, chestY, chestZ, capacity)
     end
   end
 
+  loadState()
   site = {
     minX = loX, maxX = hiX, minZ = loZ, maxZ = hiZ, y = y,
-    chest = { x = chestX, y = chestY, z = chestZ },
+    chests = site and site.chests or {}, -- carried forward, see comment above
     capacity = capacity,
     cells = cells,
     assignments = {}, -- turtle name -> cell index (0-based)
@@ -138,9 +142,83 @@ function M.get()
   return site
 end
 
-function M.chest()
+-- Adds one chest location: either an exact point (maxX/Y/Z all nil), or
+-- a box (any/all of maxX/Y/Z given -- an axis with no max collapses to a
+-- single coordinate on that axis, so e.g. only maxY need be given to
+-- allow a chest anywhere in a vertical range at a fixed x/z) that a
+-- chest may be found anywhere within. Multiple chests can be added --
+-- e.g. one at (0,0,0) and a separate, unrelated one at (10,10,10) -- each
+-- tracked independently; M.nearestChest() below picks whichever is
+-- closest to a given position. Returns the added entry, or nil, reason
+-- if no worksite is configured yet (M.set() must run first -- there's
+-- nowhere to attach a chest to otherwise).
+function M.addChest(x, y, z, maxX, maxY, maxZ)
   loadState()
-  return site and site.chest or nil
+  if not site then return nil, "no worksite configured -- run worksite set first" end
+
+  local bounds = nil
+  local point = { x = x, y = y, z = z }
+  if maxX or maxY or maxZ then
+    bounds = {
+      minX = math.min(x, maxX or x), maxX = math.max(x, maxX or x),
+      minY = math.min(y, maxY or y), maxY = math.max(y, maxY or y),
+      minZ = math.min(z, maxZ or z), maxZ = math.max(z, maxZ or z),
+    }
+    -- The representative point used for distance/goto math is the box's
+    -- center -- a sensible search starting point when the exact chest
+    -- position within the box isn't known yet, rounded to the nearest
+    -- integer since a turtle can only stand on one.
+    point = {
+      x = math.floor((bounds.minX + bounds.maxX) / 2 + 0.5),
+      y = math.floor((bounds.minY + bounds.maxY) / 2 + 0.5),
+      z = math.floor((bounds.minZ + bounds.maxZ) / 2 + 0.5),
+    }
+  end
+
+  local entry = { x = point.x, y = point.y, z = point.z, bounds = bounds }
+  site.chests[#site.chests + 1] = entry
+  save()
+  return entry
+end
+
+-- Removes the chest at `index` (1-based, matching M.listChests()'s own
+-- ordering). Returns true, or false, reason if the index doesn't exist.
+function M.removeChest(index)
+  loadState()
+  if not site then return false, "no worksite configured" end
+  if not site.chests[index] then return false, "no chest at index " .. tostring(index) end
+  table.remove(site.chests, index)
+  save()
+  return true
+end
+
+-- Every configured chest -- an array of { x, y, z, bounds }, bounds nil
+-- for an exact point (see M.addChest() above). Empty (not nil) if a
+-- worksite is configured but no chest has been added yet; nil if no
+-- worksite is configured at all.
+function M.listChests()
+  loadState()
+  return site and site.chests or nil
+end
+
+-- Whichever configured chest's representative point (see M.addChest())
+-- is closest to `pos`, by the same Manhattan-distance metric
+-- lib/fuel.lua's M.travelCost() uses everywhere else a turtle's fuel is
+-- judged against a trip -- so picking "nearest" here and judging whether
+-- a turtle can reach it stay in agreement. nil if no worksite is
+-- configured, or none has any chest added yet.
+function M.nearestChest(pos)
+  loadState()
+  if not site or #site.chests == 0 then return nil end
+
+  local best, bestDist = nil, nil
+  for _, entry in ipairs(site.chests) do
+    local dist = math.abs(pos.x - entry.x) + math.abs(pos.y - entry.y) + math.abs(pos.z - entry.z)
+    if not best or dist < bestDist then
+      best, bestDist = entry, dist
+    end
+  end
+  return best
 end
 
 -- The cell already assigned to `name`, or the next unclaimed one

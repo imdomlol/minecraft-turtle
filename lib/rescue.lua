@@ -106,12 +106,13 @@ end
 -- rescue; the selected slot is left on that stack so the caller can
 -- consume only as much as needed for its own tank before donating the
 -- rest.
-local function takeOneFuelStack(chestX, chestY, chestZ)
+local function takeOneFuelStack(chestX, chestY, chestZ, chestBounds)
   local excluded = {}
   for _ = 1, MAX_FUEL_CHESTS do
     local chest, chestErr = chestfinder.find({
       x = chestX, y = chestY, z = chestZ,
       exclude = excluded,
+      bounds = chestBounds,
     })
     if not chest then return nil, "could not find a fuel chest: " .. tostring(chestErr) end
 
@@ -193,12 +194,14 @@ local function faceStrandedTurtle()
   return nil
 end
 
--- Performs a full rescue. Returns true, message on success, or false,
--- reason on failure -- a failure partway through (couldn't reach the
--- chest, couldn't reach the stranded turtle) leaves any already-paused
--- job stopped rather than resumed, rather than risk resuming from the
--- wrong position.
-function M.perform(strandedX, strandedY, strandedZ, chestX, chestY, chestZ)
+-- Performs a full rescue. chestBounds (optional, see lib/chestfinder.lua's
+-- opts.bounds) constrains takeOneFuelStack()'s search to a configured
+-- chest range rather than the exact chestX/Y/Z point. Returns true,
+-- message on success, or false, reason on failure -- a failure partway
+-- through (couldn't reach the chest, couldn't reach the stranded turtle)
+-- leaves any already-paused job stopped rather than resumed, rather than
+-- risk resuming from the wrong position.
+function M.perform(strandedX, strandedY, strandedZ, chestX, chestY, chestZ, chestBounds)
   local pausedPos = nav.getPosition()
   local paused, resumeName, resumeParams = pauseCurrentJob()
   if not paused then
@@ -213,7 +216,7 @@ function M.perform(strandedX, strandedY, strandedZ, chestX, chestY, chestZ)
       .. "s -- aborting rather than risk moving the turtle while it might still be running"
   end
 
-  local chest, chestErr = takeOneFuelStack(chestX, chestY, chestZ)
+  local chest, chestErr = takeOneFuelStack(chestX, chestY, chestZ, chestBounds)
   if not chest then
     return false, "could not reach the chest to fetch fuel: " .. tostring(chestErr)
   end

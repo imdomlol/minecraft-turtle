@@ -45,6 +45,16 @@ local function posKey(x, y, z)
   return x .. "," .. y .. "," .. z
 end
 
+-- bounds (optional): { minX, minY, minZ, maxX, maxY, maxZ }, from e.g.
+-- dom-main/controller/worksite.lua's M.chestBounds(). nil means
+-- unbounded (unchanged behavior) -- every position is "within" it.
+local function withinBounds(x, y, z, bounds)
+  if not bounds then return true end
+  return x >= bounds.minX and x <= bounds.maxX
+    and y >= bounds.minY and y <= bounds.maxY
+    and z >= bounds.minZ and z <= bounds.maxZ
+end
+
 -- Checks the 4 horizontal neighbors (turning through all of them) plus
 -- up/down of the turtle's current cell. Returns the chest's world
 -- position, block name, and which turtle.drop*() variant reaches it
@@ -57,14 +67,18 @@ end
 -- re-searching from right next to a chest that's already been tried
 -- (and is still full) would just immediately re-"find" that exact same
 -- one, over and over, never reaching a genuinely different chest.
-local function scanHere(matchName, exclude)
+-- bounds (optional, see withinBounds() above): a candidate outside it is
+-- skipped exactly like an excluded one -- the search continues as if it
+-- weren't there, rather than accepting a chest outside the configured
+-- range.
+local function scanHere(matchName, exclude, bounds)
   for _ = 1, 4 do
     local found, data = turtle.inspect()
     if found and looksLikeChest(data.name, matchName) then
       local pos = nav.getPosition()
       local d = DELTA[pos.heading]
       local x, y, z = pos.x + d.x, pos.y, pos.z + d.z
-      if not (exclude and exclude[posKey(x, y, z)]) then
+      if not (exclude and exclude[posKey(x, y, z)]) and withinBounds(x, y, z, bounds) then
         return { x = x, y = y, z = z, name = data.name, direction = "front" }
       end
     end
@@ -75,7 +89,7 @@ local function scanHere(matchName, exclude)
   if foundUp and looksLikeChest(dataUp.name, matchName) then
     local pos = nav.getPosition()
     local x, y, z = pos.x, pos.y + 1, pos.z
-    if not (exclude and exclude[posKey(x, y, z)]) then
+    if not (exclude and exclude[posKey(x, y, z)]) and withinBounds(x, y, z, bounds) then
       return { x = x, y = y, z = z, name = dataUp.name, direction = "up" }
     end
   end
@@ -84,7 +98,7 @@ local function scanHere(matchName, exclude)
   if foundDown and looksLikeChest(dataDown.name, matchName) then
     local pos = nav.getPosition()
     local x, y, z = pos.x, pos.y - 1, pos.z
-    if not (exclude and exclude[posKey(x, y, z)]) then
+    if not (exclude and exclude[posKey(x, y, z)]) and withinBounds(x, y, z, bounds) then
       return { x = x, y = y, z = z, name = dataDown.name, direction = "down" }
     end
   end
@@ -108,12 +122,12 @@ end
 -- spiral (or the caller) starts from exactly where it expects to.
 local VERTICAL_SEARCH_HEIGHT = 6
 
-local function verticalSearch(matchName, exclude, maxHeight)
+local function verticalSearch(matchName, exclude, maxHeight, bounds)
   local up = 0
   while up < maxHeight do
     if not nav.up() then break end
     up = up + 1
-    local found = scanHere(matchName, exclude)
+    local found = scanHere(matchName, exclude, bounds)
     if found then return found end
   end
   for _ = 1, up do nav.down() end
@@ -122,7 +136,7 @@ local function verticalSearch(matchName, exclude, maxHeight)
   while down < maxHeight do
     if not nav.down() then break end
     down = down + 1
-    local found = scanHere(matchName, exclude)
+    local found = scanHere(matchName, exclude, bounds)
     if found then return found end
   end
   for _ = 1, down do nav.up() end
@@ -155,11 +169,11 @@ end
 -- around the starting point. Scans every cell it visits along the way.
 -- Tries straight up/down first (see verticalSearch above) before ever
 -- moving horizontally.
-local function spiralSearch(maxRadius, matchName, exclude)
-  local found = scanHere(matchName, exclude)
+local function spiralSearch(maxRadius, matchName, exclude, bounds)
+  local found = scanHere(matchName, exclude, bounds)
   if found then return found end
 
-  found = verticalSearch(matchName, exclude, VERTICAL_SEARCH_HEIGHT)
+  found = verticalSearch(matchName, exclude, VERTICAL_SEARCH_HEIGHT, bounds)
   if found then return found end
 
   faceOpenDirection()
@@ -171,7 +185,7 @@ local function spiralSearch(maxRadius, matchName, exclude)
     for _ = 1, legLength do
       local ok = nav.forward()
       if not ok then return nil, "search blocked" end
-      local f = scanHere(matchName, exclude)
+      local f = scanHere(matchName, exclude, bounds)
       if f then return f end
     end
     nav.turnRight()
@@ -200,6 +214,13 @@ M.posKey = posKey
 -- (or already tried some other way): without this, re-searching from
 -- right next to that same chest would just immediately re-"find" it
 -- again, never reaching a genuinely different one.
+-- opts.bounds (optional, { minX, minY, minZ, maxX, maxY, maxZ } -- see
+-- dom-main/controller/worksite.lua's M.chestBounds()) rejects any
+-- candidate chest outside it, as if it weren't there at all -- same
+-- mechanism as opts.exclude, just geometric instead of by-position. When
+-- given and opts.maxRadius isn't, the search radius is widened (never
+-- narrowed) to reach every corner of the box from the search center, so
+-- a large configured range doesn't get cut off by the usual default.
 -- Reaching (x, y, z) in the first place digs through obstacles ("safe"
 -- mode, see above); the search itself, once there, never does. Returns
 -- the chest's position/name on success. On failure, returns nil,
@@ -208,8 +229,8 @@ M.posKey = posKey
 -- (or in place, for one above/below), ready to interact with it.
 function M.find(opts)
   opts = opts or {}
-  local maxRadius = opts.maxRadius or DEFAULT_MAX_RADIUS
   local matchName = opts.matchName
+  local bounds = opts.bounds
 
   local target = opts
   if not (opts.x and opts.y and opts.z) then
@@ -218,6 +239,16 @@ function M.find(opts)
       return nil, "no location given and no home position recorded (call home.mark() first)"
     end
   end
+
+  local maxRadius = opts.maxRadius
+  if not maxRadius and bounds then
+    maxRadius = math.max(
+      DEFAULT_MAX_RADIUS,
+      math.abs(target.x - bounds.minX), math.abs(target.x - bounds.maxX),
+      math.abs(target.z - bounds.minZ), math.abs(target.z - bounds.maxZ)
+    )
+  end
+  maxRadius = maxRadius or DEFAULT_MAX_RADIUS
 
   -- If the turtle is already directly above/below target (same x/z,
   -- within verticalSearch()'s own reach on y) -- exactly where a
@@ -242,7 +273,8 @@ function M.find(opts)
   local herePos = nav.getPosition()
   local horizontalDist = math.abs(herePos.x - target.x) + math.abs(herePos.z - target.z)
   if horizontalDist <= 1 and math.abs(herePos.y - target.y) <= VERTICAL_SEARCH_HEIGHT then
-    local nearby = scanHere(matchName, opts.exclude) or verticalSearch(matchName, opts.exclude, VERTICAL_SEARCH_HEIGHT)
+    local nearby = scanHere(matchName, opts.exclude, bounds)
+      or verticalSearch(matchName, opts.exclude, VERTICAL_SEARCH_HEIGHT, bounds)
     if nearby then return nearby end
   end
 
@@ -276,7 +308,7 @@ function M.find(opts)
   end
 
   local searchStart = nav.getPosition()
-  local found, reason = spiralSearch(maxRadius, matchName, opts.exclude)
+  local found, reason = spiralSearch(maxRadius, matchName, opts.exclude, bounds)
   if found then return found end
 
   routing.goto(searchStart.x, searchStart.y, searchStart.z, { tolerance = 0, allowDig = false })
@@ -318,7 +350,7 @@ function M.dump(opts)
     maxRadius = hasCoords and 0 or DEFAULT_MAX_RADIUS
   end
 
-  local found, reason = M.find({ x = x, y = y, z = z, maxRadius = maxRadius, matchName = opts.matchName })
+  local found, reason = M.find({ x = x, y = y, z = z, maxRadius = maxRadius, matchName = opts.matchName, bounds = opts.bounds })
   if not found then
     return nil, reason
   end

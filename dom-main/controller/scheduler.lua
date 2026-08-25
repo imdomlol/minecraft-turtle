@@ -87,6 +87,7 @@ local M = {}
 -- controller-side, not by an operator's CLI invocation.
 local function luaLiteral(v)
   local t = type(v)
+  if t == "nil" then return "nil" end
   if t == "string" then return string.format("%q", v) end
   if t == "number" or t == "boolean" then return tostring(v) end
   if t == "table" then
@@ -141,8 +142,11 @@ end
 -- either one is).
 function M.isStranded(entry)
   if type(entry.fuel) ~= "number" then return false end
-  local chest = worksite.chest()
-  if not chest or not M.hasKnownPosition(entry) then
+  if not M.hasKnownPosition(entry) then
+    return entry.fuel < STRANDED_FUEL_THRESHOLD
+  end
+  local chest = worksite.nearestChest(entry.position)
+  if not chest then
     return entry.fuel < STRANDED_FUEL_THRESHOLD
   end
   return entry.fuel < fuel.travelCost(entry.position, chest)
@@ -162,8 +166,9 @@ end
 -- see M.dispatchToChest() below.
 function M.needsSelfRefuel(entry)
   if type(entry.fuel) ~= "number" then return false end
-  local chest = worksite.chest()
-  if not chest or not M.hasKnownPosition(entry) then return false end
+  if not M.hasKnownPosition(entry) then return false end
+  local chest = worksite.nearestChest(entry.position)
+  if not chest then return false end
   if M.isStranded(entry) then return false end
   return entry.fuel < selfRefuelTarget(entry, chest)
 end
@@ -197,12 +202,16 @@ end
 -- M.resumeOrRequest()), and either way the rescuer is topping up at the
 -- chest anyway, so "already has fuel to spare" no longer matters for the
 -- choice. Ranked by whichever eligible candidate is closest to the
--- chest -- the chest's position is fixed, so that's the only leg of the
--- total trip that actually varies by which turtle gets picked. nil if
--- nobody qualifies, or if there's no worksite chest configured at all
--- (nowhere to send anyone to fetch fuel from).
+-- chest nearest the STRANDED turtle (see worksite.lua's M.nearestChest()
+-- -- with multiple chests configured, this is the one the rescuer will
+-- actually be sent to fetch fuel from and deliver from, so it's the only
+-- leg of the total trip that actually varies by which turtle gets
+-- picked). nil if nobody qualifies, or if there's no worksite chest
+-- configured at all (nowhere to send anyone to fetch fuel from).
 function M.pickRescuer(snapshot, strandedName, exclude)
-  local chest = worksite.chest()
+  local strandedEntry = snapshot[strandedName]
+  local chest = strandedEntry and M.hasKnownPosition(strandedEntry)
+    and worksite.nearestChest(strandedEntry.position)
   if not chest then return nil end
 
   local best, bestCost = nil, nil
@@ -240,8 +249,14 @@ function M.assignWork(name)
   end
 
   local jobSpec = worksite.jobFor(cell)
-  local chest = worksite.chest()
-  if chest then jobSpec.params.chestPos = chest end
+  -- Whichever configured chest is nearest the cell's own origin -- with
+  -- multiple chests (see worksite.lua's M.nearestChest()), a turtle's
+  -- unload trips should head for the one actually close to where it's
+  -- working, not always the same fixed one regardless of cell.
+  local chest = worksite.nearestChest(jobSpec.origin)
+  if chest then
+    jobSpec.params.chestPos = { x = chest.x, y = chest.y, z = chest.z, bounds = chest.bounds }
+  end
 
   local command = string.format(
     'local job = dofile("/lib/job.lua"); '
@@ -275,12 +290,12 @@ end
 -- stranded turtle refuel and reassigns it its own (same, sticky) cell.
 function M.attemptRescue(strandedName, strandedEntry, rescuerName)
   local pos = strandedEntry.position
-  local chest = worksite.chest()
+  local chest = worksite.nearestChest(pos)
   print("scheduler: dispatching " .. rescuerName .. " to fetch fuel and refuel stranded turtle " .. strandedName)
 
   local rescueCommand = string.format(
-    'return dofile("/lib/rescue.lua").perform(%d, %d, %d, %d, %d, %d)',
-    pos.x, pos.y, pos.z, chest.x, chest.y, chest.z
+    'return dofile("/lib/rescue.lua").perform(%d, %d, %d, %d, %d, %d, %s)',
+    pos.x, pos.y, pos.z, chest.x, chest.y, chest.z, luaLiteral(chest.bounds)
   )
 
   local ok, output = roster.proxy(rescuerName, rescueCommand, RESCUE_TIMEOUT)
@@ -324,18 +339,18 @@ end
 -- any other idle dispatch (M.assignWork() -- picks the checkpoint back
 -- up if there is one, same as a real rescue does).
 function M.dispatchToChest(name, entry)
-  local chest = worksite.chest()
+  local chest = worksite.nearestChest(entry.position)
   local target = selfRefuelTarget(entry, chest)
   print("scheduler: sending " .. name .. " to the chest to refuel (enough to get there, not enough to keep mining safely)")
 
   local command = string.format(
     'local chestfinder = dofile("/lib/chestfinder.lua"); '
-      .. 'local found, reason = chestfinder.find({ x = %d, y = %d, z = %d }); '
+      .. 'local found, reason = chestfinder.find({ x = %d, y = %d, z = %d, bounds = %s }); '
       .. 'if not found then return false, "could not reach the chest: " .. tostring(reason) end; '
       .. 'local ok, refuelReason = dofile("/lib/fuel.lua").ensureFuel(%d); '
       .. 'if not ok then error("reached the chest but could not refuel: " .. tostring(refuelReason), 0) end; '
       .. 'return true, "refueled to " .. tostring(turtle.getFuelLevel())',
-    chest.x, chest.y, chest.z, target
+    chest.x, chest.y, chest.z, luaLiteral(chest.bounds), target
   )
 
   local ok, output = roster.proxy(name, command, REFUEL_TRIP_TIMEOUT)
@@ -354,8 +369,8 @@ end
 -- refuel command because the rescuer later failed or timed out on its
 -- own return trip.
 function M.refuelFromInventory(name, entry)
-  local chest = worksite.chest()
-  local target = (chest and M.hasKnownPosition(entry)) and selfRefuelTarget(entry, chest) or 1
+  local chest = M.hasKnownPosition(entry) and worksite.nearestChest(entry.position)
+  local target = chest and selfRefuelTarget(entry, chest) or 1
   print("scheduler: " .. name .. " is stranded but has fuel items -- trying inventory refuel before rescue")
   local ok, output = roster.proxy(name,
     "local ok, reason = dofile(\"/lib/fuel.lua\").ensureFuel(" .. target .. "); "

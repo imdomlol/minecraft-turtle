@@ -39,6 +39,7 @@ local STATE_PATH = "/state/roster.state"
 local roster = {}        -- name -> { computerId, label, fuel, position, job, lastSeen }
 local cmdCounter = 0
 local collisionCounter = 0
+local RECONNECT_GAP_MS = 15000
 
 local function save()
   if not fs.exists("/state") then fs.makeDir("/state") end
@@ -96,6 +97,18 @@ local function upsert(senderId, message)
     return
   end
   local now = os.epoch("utc")
+  if existing then
+    local gap = existing.lastSeen and (now - existing.lastSeen) or 0
+    local rebooted = type(existing.uptime) == "number" and type(message.uptime) == "number"
+      and message.uptime + 5 < existing.uptime
+    if rebooted then
+      print("roster: " .. tostring(name) .. " reconnected after reboot")
+    elseif gap > RECONNECT_GAP_MS then
+      print("roster: " .. tostring(name) .. " reconnected after " .. math.floor(gap / 1000) .. "s away")
+    end
+  else
+    print("roster: " .. tostring(name) .. " connected")
+  end
   roster[name] = {
     computerId = senderId,
     label = message.label,
@@ -103,6 +116,7 @@ local function upsert(senderId, message)
     fuelItems = message.fuelItems,
     position = message.position,
     job = message.job,
+    uptime = message.uptime,
     lastSeen = now,
     -- Preserved across every heartbeat rather than reset -- this whole
     -- table gets replaced wholesale on every upsert, so without this a
@@ -212,6 +226,7 @@ function M.report()
       label = entry.label,
       fuel = entry.fuel,
       fuelItems = entry.fuelItems,
+      uptime = entry.uptime,
       position = entry.position,
       job = entry.job,
       secondsAgo = math.floor((now - entry.lastSeen) / 1000),
