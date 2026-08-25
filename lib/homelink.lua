@@ -25,6 +25,7 @@
 if _G.__HOMELINK_MODULE then return _G.__HOMELINK_MODULE end
 
 local nav = dofile("/lib/nav.lua")
+local routing = dofile("/lib/routing.lua")
 
 local M = {}
 
@@ -45,6 +46,59 @@ local DELTA = {
 
 local function isProtected(data)
   return data ~= nil and (nav.isChest(data.name) or nav.isComputerCraftBlock(data.name))
+end
+
+function M.isItem(slot)
+  local detail = turtle.getItemDetail(slot)
+  return detail ~= nil and detail.name == ITEM_NAME
+end
+
+local function firstEmptySlot(except)
+  for slot = 1, 16 do
+    if slot ~= except and turtle.getItemCount(slot) == 0 then
+      return slot
+    end
+  end
+  return nil
+end
+
+local function clearReservedSlot(avoidSlot)
+  if turtle.getItemCount(M.SLOT) == 0 or M.isItem(M.SLOT) then return true end
+  local spare = firstEmptySlot(avoidSlot or M.SLOT)
+  if spare then
+    turtle.select(M.SLOT)
+    return turtle.transferTo(spare)
+  end
+  turtle.select(M.SLOT)
+  return turtle.dropDown() or turtle.drop() or turtle.dropUp()
+end
+
+function M.moveToReserved(slot)
+  if not slot or slot == M.SLOT then return M.isItem(M.SLOT) end
+  if not M.isItem(slot) then return false, "slot " .. tostring(slot) .. " is not the home-link chest" end
+  if not clearReservedSlot(slot) then
+    return false, "could not clear slot " .. M.SLOT .. " for the home-link chest"
+  end
+  turtle.select(slot)
+  if not turtle.transferTo(M.SLOT) then
+    return false, "could not move home-link chest from slot " .. slot .. " to " .. M.SLOT
+  end
+  return M.isItem(M.SLOT)
+end
+
+function M.findInInventory()
+  if M.isItem(M.SLOT) then return M.SLOT end
+  for slot = 1, 16 do
+    if slot ~= M.SLOT and M.isItem(slot) then return slot end
+  end
+  return nil
+end
+
+function M.normalizeInventory()
+  local slot = M.findInInventory()
+  if not slot then return false, "no home-link chest in inventory" end
+  if slot == M.SLOT then return true, "already in slot " .. M.SLOT end
+  return M.moveToReserved(slot)
 end
 
 local function saveState(data)
@@ -123,6 +177,12 @@ local function placed(direction, gpsOk, gpsInfo)
   return direction
 end
 
+local function inspectDirection(direction)
+  if direction == "up" then return turtle.inspectUp() end
+  if direction == "down" then return turtle.inspectDown() end
+  return turtle.inspect()
+end
+
 -- Tries front, then up, then down, and places the chest in whichever
 -- one is actually open -- or, if all three are already occupied, clears
 -- ONE of them first and retries. Confirmed live: a turtle mid-shaft,
@@ -140,8 +200,11 @@ end
 -- protected. Returns the direction it succeeded in ("front", "up", or
 -- "down").
 function M.place()
-  if turtle.getItemCount(M.SLOT) == 0 then
-    return nil, "no home-link chest in slot " .. M.SLOT
+  if not M.isItem(M.SLOT) then
+    local normalized = M.normalizeInventory()
+    if not normalized then
+      return nil, "no home-link chest in slot " .. M.SLOT
+    end
   end
   local gpsOk, gpsInfo = nav.reacquireGPS()
   turtle.select(M.SLOT)
@@ -195,8 +258,7 @@ function M.pickUp(direction)
   elseif direction == "down" then dig = turtle.digDown end
 
   local function isChest(slot)
-    local detail = turtle.getItemDetail(slot)
-    return detail ~= nil and detail.name == ITEM_NAME
+    return M.isItem(slot)
   end
 
   local function dropAwayFromChest()
@@ -204,27 +266,25 @@ function M.pickUp(direction)
     return turtle.drop()
   end
 
-  local function firstEmptySlot(except)
-    for slot = 1, 16 do
-      if slot ~= except and turtle.getItemCount(slot) == 0 then
-        return slot
-      end
-    end
-    return nil
-  end
-
-  local before = {}
-  for slot = 1, 16 do before[slot] = turtle.getItemCount(slot) end
-
   local slotDetail = turtle.getItemDetail(M.SLOT)
   if slotDetail and slotDetail.name ~= ITEM_NAME then
     turtle.select(M.SLOT)
     dropAwayFromChest()
-    if turtle.getItemCount(M.SLOT) > 0 and not firstEmptySlot(M.SLOT) then
-      return false, "not picking the home-link chest up while slot " .. M.SLOT
-        .. " is blocked and no spare slot is available"
+    if turtle.getItemCount(M.SLOT) > 0 then
+      local spare = firstEmptySlot(M.SLOT)
+      if not spare then
+        return false, "not picking the home-link chest up while slot " .. M.SLOT
+          .. " is blocked and no spare slot is available"
+      end
+      if not turtle.transferTo(spare) then
+        return false, "not picking the home-link chest up because slot " .. M.SLOT
+          .. " could not be cleared"
+      end
     end
   end
+
+  local before = {}
+  for slot = 1, 16 do before[slot] = turtle.getItemCount(slot) end
 
   turtle.select(M.SLOT)
   local ok, reason = dig()
@@ -244,17 +304,10 @@ function M.pickUp(direction)
   for slot = 1, 16 do
     if slot ~= M.SLOT and turtle.getItemCount(slot) > (before[slot] or 0) and isChest(slot) then
       if turtle.getItemCount(M.SLOT) > 0 and not isChest(M.SLOT) then
-        local spare = firstEmptySlot(slot)
-        if not spare then
+        if not clearReservedSlot(slot) then
           markPickup("pickup_failed", "slot " .. M.SLOT .. " blocked and no spare slot is available")
           return false, "dug the home-link chest into slot " .. slot
             .. " but slot " .. M.SLOT .. " is blocked and no spare slot is available"
-        end
-        turtle.select(M.SLOT)
-        if not turtle.transferTo(spare) then
-          markPickup("pickup_failed", "could not clear blocked slot " .. M.SLOT)
-          return false, "dug the home-link chest into slot " .. slot
-            .. " but could not clear blocked slot " .. M.SLOT
         end
       end
       turtle.select(slot)
@@ -272,6 +325,32 @@ function M.pickUp(direction)
 
   markPickup("pickup_failed", "dug chest but no ender chest item appeared in inventory")
   return false, "dug the home-link chest but it never reappeared in inventory -- may be lost"
+end
+
+function M.recover()
+  local inventoryOk, inventoryInfo = M.normalizeInventory()
+  if inventoryOk then return true, inventoryInfo end
+
+  local saved = loadState()
+  if not saved or saved.status ~= "placed" or not saved.turtle or not saved.direction then
+    return false, "no home-link chest in inventory and no placed chest recorded"
+  end
+
+  local target = saved.turtle
+  local reached, reachInfo = routing.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = "safe" })
+  if not reached then
+    return false, "could not reach recorded home-link chest position: " .. tostring(reachInfo and reachInfo.reason)
+  end
+  nav.face(target.heading or target.facing)
+
+  local found, data = inspectDirection(saved.direction)
+  if not (found and nav.isChest(data.name)) then
+    return false, "recorded home-link chest is no longer present at the saved position"
+  end
+
+  local picked, pickInfo = M.pickUp(saved.direction)
+  if not picked then return false, pickInfo end
+  return true, pickInfo or "recovered placed home-link chest"
 end
 
 _G.__HOMELINK_MODULE = M

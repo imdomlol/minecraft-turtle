@@ -21,8 +21,16 @@
 
 local fleet = dofile("/lib/fleet.lua")
 local job = dofile("/lib/job.lua")
+local homelink = dofile("/lib/homelink.lua")
 
 job.register("mine_vertical", dofile("/dom-main/mining/vertical.lua").run)
+
+local recoveredHomeLink, homeLinkInfo = homelink.recover()
+if recoveredHomeLink then
+  print("homelink: " .. tostring(homeLinkInfo))
+else
+  print("homelink: unavailable (" .. tostring(homeLinkInfo) .. ") -- worksite storage fallback remains available")
+end
 
 local saved = job.loadCheckpoint()
 if saved and job.hasJob(saved.name) then

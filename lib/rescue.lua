@@ -24,6 +24,7 @@ local job = dofile("/lib/job.lua")
 local fuel = dofile("/lib/fuel.lua")
 local chestfinder = dofile("/lib/chestfinder.lua")
 local inventory = dofile("/lib/inventory.lua")
+local homelink = dofile("/lib/homelink.lua")
 
 local M = {}
 
@@ -131,7 +132,11 @@ local function takeOneFuelStack(chestX, chestY, chestZ, chestBounds)
           if turtle.refuel(0) then
             return chest, slot
           end
-          drop()
+          if homelink.isItem(slot) then
+            homelink.moveToReserved(slot)
+          else
+            drop()
+          end
         end
         excluded[chestfinder.posKey(chest.x, chest.y, chest.z)] = true
       end
@@ -155,7 +160,9 @@ local function giveHalfFuel(direction)
   for slot = 1, 16 do
     turtle.select(slot)
     local count = turtle.getItemCount(slot)
-    if count > 0 and turtle.refuel(0) then
+    if homelink.isItem(slot) then
+      homelink.moveToReserved(slot)
+    elseif count > 0 and turtle.refuel(0) then
       local giveCount = math.floor(count / 2)
       if giveCount > 0 and drop(giveCount) then
         dropped = dropped + giveCount
