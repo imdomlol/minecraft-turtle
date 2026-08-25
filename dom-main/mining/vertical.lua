@@ -506,8 +506,18 @@ local function tryHomeLink()
     return false, placeErr
   end
 
-  inventory.dropAll(direction)
+  -- Refuel BEFORE dropping loot, not after -- confirmed live: doing it
+  -- the other way round meant turtle.suck() (which always grabs
+  -- whichever slot the target inventory happens to expose first, never
+  -- a specific item) spent its attempts pulling the turtle's OWN just-
+  -- dropped cargo back out of the shared chest, since that now occupied
+  -- the chest's earliest slots -- never reaching the actual coal
+  -- however deep in the chest's own slot order it happened to be. Fuel
+  -- first means M.refuelFrom() only ever sees whatever the chest
+  -- already had (ideally just AE2-stocked coal) before this turtle
+  -- adds anything of its own to it.
   fuel.refuelFrom(SUCK_BY_DIRECTION[direction], fuel.maxFuel())
+  inventory.dropAll(direction)
 
   local ok, pickErr = homelink.pickUp(direction)
   if not ok then
