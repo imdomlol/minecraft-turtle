@@ -152,7 +152,14 @@ local function markPlaced(direction, gpsOk, gpsInfo)
   return marker
 end
 
-local function markPickup(status, reason)
+-- `forensics` (optional): extra diagnostic fields merged straight into
+-- the saved state (e.g. { preDig = <block name seen right before
+-- digging, or false>, floorRetry = true }) -- see M.pickUp()'s own
+-- comments for why these specific fields exist: distinguishing "already
+-- gone before this turtle touched it" from "genuinely dug it and lost
+-- the drop" needed more than a single free-text reason string to
+-- diagnose after the fact.
+local function markPickup(status, reason, forensics)
   local pos = nav.getPosition()
   local previous = loadState() or {}
   previous.status = status
@@ -165,6 +172,9 @@ local function markPickup(status, reason)
     source = pos.source,
   }
   previous.updatedAt = os.epoch and os.epoch("utc") or os.clock()
+  if forensics then
+    for k, v in pairs(forensics) do previous[k] = v end
+  end
   saveState(previous)
 end
 
@@ -181,6 +191,28 @@ local function inspectDirection(direction)
   if direction == "up" then return turtle.inspectUp() end
   if direction == "down" then return turtle.inspectDown() end
   return turtle.inspect()
+end
+
+-- Steps into the space just dug, briefly, and back out. turtle.dig()
+-- only reports whether the BLOCK broke -- collecting the resulting item
+-- is a separate step that (per CC:Tweaked/Minecraft) happens by the
+-- turtle occupying or passing through that space, not from dig() itself.
+-- Confirmed live earlier this session (lib/chestfinder.lua's incidental
+-- travel-digging): a dug item can sit as an uncollected floor entity for
+-- a tick or two rather than landing in inventory immediately. This is a
+-- last-resort recovery attempt for M.pickUp()'s "dug it, nothing
+-- appeared" case below -- cheap, and directionally safe (moves back the
+-- way it came, into a space it just confirmed is now empty).
+local function tryCollectFloorItem(direction)
+  local move, back
+  if direction == "up" then move, back = turtle.up, turtle.down
+  elseif direction == "down" then move, back = turtle.down, turtle.up
+  else move, back = turtle.forward, turtle.back end
+
+  if not move() then return false end
+  sleep(0.5)
+  back()
+  return true
 end
 
 -- Tries front, then up, then down, and places the chest in whichever
@@ -283,6 +315,27 @@ function M.pickUp(direction)
     end
   end
 
+  -- Confirmed live (4 of 6 turtles, same night, same exact failure):
+  -- dig() can report success (the block broke) while no ender chest item
+  -- ever appears anywhere in inventory afterward -- happened at
+  -- different positions, y-levels, and directions, so it isn't one bad
+  -- spot. Checking what was actually there right before digging (rather
+  -- than trusting M.place()'s minutes-old record) separates two very
+  -- different failures: something else already removed/replaced the
+  -- block before this turtle ever touched it (preDig.found == false, or
+  -- a name that isn't a chest at all) vs. this turtle's own dig()
+  -- genuinely destroyed the real chest and its drop never showed up
+  -- (preDig confirms a chest was really there). Recorded either way for
+  -- forensics -- see markPickup() calls below.
+  local preDigFound, preDigData = inspectDirection(direction)
+  local preDigName = preDigFound and preDigData.name or nil
+  if not (preDigFound and nav.isChest(preDigName)) then
+    markPickup("pickup_failed", "expected chest not present before digging (saw: "
+      .. tostring(preDigName or "nothing") .. ")", { preDig = preDigName or false })
+    return false, "home-link chest is no longer at the expected position (saw: "
+      .. tostring(preDigName or "nothing") .. ") -- something else happened to it before pickup"
+  end
+
   local before = {}
   for slot = 1, 16 do before[slot] = turtle.getItemCount(slot) end
 
@@ -323,8 +376,38 @@ function M.pickUp(direction)
     end
   end
 
-  markPickup("pickup_failed", "dug chest but no ender chest item appeared in inventory")
-  return false, "dug the home-link chest but it never reappeared in inventory -- may be lost"
+  -- Confirmed the block WAS the chest right before digging (preDig check
+  -- above), dig() reported success, and yet nothing matching ITEM_NAME
+  -- showed up in any slot -- the item may simply not have been auto-
+  -- collected yet (see tryCollectFloorItem()'s own comment: this exact
+  -- gap already produced a false "lost" reading once earlier this
+  -- session, via lib/chestfinder.lua's incidental travel-digging). One
+  -- cheap last-resort attempt before giving up for good.
+  if tryCollectFloorItem(direction) then
+    for slot = 1, 16 do
+      if turtle.getItemCount(slot) > (before[slot] or 0) and isChest(slot) then
+        if slot ~= M.SLOT then
+          if turtle.getItemCount(M.SLOT) > 0 and not isChest(M.SLOT) and not clearReservedSlot(slot) then
+            markPickup("pickup_failed", "recovered via floor pickup into slot " .. slot
+              .. " but slot " .. M.SLOT .. " is blocked and no spare slot is available")
+            return false, "recovered the home-link chest off the floor into slot " .. slot
+              .. " but slot " .. M.SLOT .. " is blocked and no spare slot is available"
+          end
+          turtle.select(slot)
+          turtle.transferTo(M.SLOT)
+        end
+        if isChest(M.SLOT) then
+          markPickup("picked_up", "recovered from the floor after dig() alone didn't collect it")
+          return true, "recovered from the floor (not collected directly by dig())"
+        end
+      end
+    end
+  end
+
+  markPickup("pickup_failed", "confirmed a real chest was dug (preDig saw " .. tostring(preDigName)
+    .. ") but no ender chest item ever appeared in inventory, including after a floor-pickup retry -- genuinely lost",
+    { preDig = preDigName, floorRetry = true })
+  return false, "dug the home-link chest but it never reappeared in inventory, even after a floor-pickup retry -- may be lost"
 end
 
 function M.recover()
