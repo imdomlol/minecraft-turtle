@@ -1040,11 +1040,11 @@ def main():
         # CraftOS's own wrap already left any necessary space in place,
         # same as this example's trailing space before the wrap point:
         # "vertical: spotted minecraft:stone to " + "the left"). A line
-        # with no "[Name] " prefix at all (the controller's own local
-        # prints -- scheduler:, fleet_listener:, etc, and its own
-        # command echoes) always flushes every sender's in-progress line
-        # first, so an interleaved controller line can never get glued
-        # onto some turtle's still-open one.
+        # with no "[Name] " prefix at all is the controller's own local
+        # output (scheduler:, fleet_listener:, command echoes, etc.) and
+        # is accumulated under sender=None by the same rules. Controller
+        # lines flush every turtle sender first, so an interleaved local
+        # line can never get glued onto some turtle's still-open one.
         #
         # --silent additionally drops a fully-reassembled line if it's:
         #   - dom-main/mining/vertical.lua's routine "spotted <block>
@@ -1080,7 +1080,7 @@ def main():
         PATHFIND_DIST_RE = re.compile(r"^pathfind: (?:heading to|arrived at) .*\[dist=([\d.]+)\]$")
         PATHFIND_SHORT_HOP = 5.0
         KNOWN_MESSAGE_PREFIXES = (
-            "vertical:", "pathfind:", "scheduler:", "fleet:", "fleet_listener:", "job:",
+            "vertical:", "pathfind:", "scheduler:", "fleet:", "fleet_listener:", "job:", "> ", "= ",
         )
 
         # This console's own heartbeat (see send_bookkeeping()/poll_loop()
@@ -1129,13 +1129,19 @@ def main():
             for sender in list(in_progress.keys()):
                 flush(sender)
 
+        def flush_others(current_sender):
+            for sender in list(in_progress.keys()):
+                if sender != current_sender:
+                    flush(sender)
+
         def process_line(line):
             m = LOG_SENDER_RE.match(line)
-            if not m:
-                flush_all()
-                emit(None, line)
-                return
-            sender, content = m.group(1), m.group(2)
+            if m:
+                sender, content = m.group(1), m.group(2)
+            else:
+                sender, content = None, line
+                flush_others(sender)
+
             if sender in in_progress and not content.startswith(KNOWN_MESSAGE_PREFIXES):
                 in_progress[sender] += content
                 return
