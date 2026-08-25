@@ -43,6 +43,56 @@ local function ensureDir()
   if not fs.exists(WORLD_DIR) then fs.makeDir(WORLD_DIR) end
 end
 
+-- Keep at least this much of the computer's total disk quota free at all
+-- times -- confirmed live: this module's per-chunk files had no cap or
+-- eviction at all, grew unbounded as the fleet explored, and eventually
+-- exhausted the WHOLE controller's disk space (CC:Tweaked's
+-- computer_space_limit, a sandboxed per-computer quota, not real host
+-- disk) outright -- taking the controller down with a raw fs write
+-- error, not a graceful one. This is purely a re-buildable observation
+-- cache (every cell gets re-recorded the next time a turtle passes by),
+-- so evicting the least-recently-touched chunks first when space gets
+-- low is a safe, self-healing trade -- unlike deleting roster/worksite/
+-- mode state, which would actually lose real configuration.
+local MIN_FREE_SPACE_BYTES = 200000
+
+-- Deletes the least-recently-modified .chunk files (on disk -- see
+-- fs.attributes()'s own `modified` field) until at least
+-- MIN_FREE_SPACE_BYTES is free again, or there's nothing left to delete.
+-- A chunk deleted here that's still cached in memory (chunks[key]) is
+-- also dropped from that cache, so a later M.query()/M.exportAll() call
+-- doesn't hand back data whose on-disk backing no longer exists after a
+-- reboot. Never touches a chunk that's currently dirty (unflushed local
+-- changes) -- see its only call site in M.flush(), which runs this
+-- BEFORE writing this cycle's own dirty chunks, so a chunk about to be
+-- freshly (re)written is never the one evicted out from under itself.
+local function pruneOldestChunksIfLow()
+  if not fs.getFreeSpace or not fs.exists(WORLD_DIR) then return end
+  if fs.getFreeSpace("/") >= MIN_FREE_SPACE_BYTES then return end
+
+  local candidates = {}
+  for _, file in ipairs(fs.list(WORLD_DIR)) do
+    local key = file:match("^(.+)%.chunk$")
+    if key and not (chunks[key] and chunks[key].dirty) then
+      local path = WORLD_DIR .. "/" .. file
+      local ok, attrs = pcall(fs.attributes, path)
+      candidates[#candidates + 1] = { path = path, key = key, modified = (ok and attrs and attrs.modified) or 0 }
+    end
+  end
+  table.sort(candidates, function(a, b) return a.modified < b.modified end)
+
+  local evicted = 0
+  for _, c in ipairs(candidates) do
+    if fs.getFreeSpace("/") >= MIN_FREE_SPACE_BYTES then break end
+    fs.delete(c.path)
+    chunks[c.key] = nil
+    evicted = evicted + 1
+  end
+  if evicted > 0 then
+    print("worldstore: low on disk space -- evicted " .. evicted .. " least-recently-touched chunk(s)")
+  end
+end
+
 local function loadPalette()
   if not fs.exists(PALETTE_PATH) then return end
   local f = fs.open(PALETTE_PATH, "r")
@@ -228,6 +278,7 @@ end
 -- just spread across many small files instead of one big one.
 function M.flush()
   ensureDir()
+  pruneOldestChunksIfLow()
 
   if paletteDirty then
     local f = fs.open(PALETTE_PATH, "w")
