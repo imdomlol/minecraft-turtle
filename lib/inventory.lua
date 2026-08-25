@@ -19,6 +19,24 @@ local SLOTS = 16
 -- is what lets every loop below stay a plain `1, CARGO_SLOTS` range.
 local CARGO_SLOTS = SLOTS - 1
 
+-- Also never drops the home-link chest ITEM itself, even if it somehow
+-- ends up in an ordinary cargo slot instead of the reserved one --
+-- confirmed live: a failed lib/homelink.lua recovery (couldn't move it
+-- back to slot 16 -- e.g. slot 16 was blocked with no spare slot to
+-- clear it into) left the chest sitting in a normal cargo slot,
+-- indistinguishable from mined loot to the CARGO_SLOTS-only check below,
+-- and it got silently dropped into an unrelated real chest on the very
+-- next ordinary unload. A duplicated string rather than a
+-- dofile("/lib/homelink.lua") import, to keep this module dependency-
+-- free and avoid a circular-load risk; keep in sync with
+-- lib/homelink.lua's own ITEM_NAME if it changes.
+local HOMELINK_ITEM_NAME = "enderstorage:ender_chest"
+
+local function isHomelinkChest(slot)
+  local detail = turtle.getItemDetail(slot)
+  return detail ~= nil and detail.name == HOMELINK_ITEM_NAME
+end
+
 -- Number of completely empty CARGO slots (never counts the reserved
 -- home-link slot, occupied or not -- see CARGO_SLOTS above). This, not
 -- remaining space in existing stacks, is what decides whether the
@@ -83,14 +101,16 @@ end
 -- Drops every nonempty CARGO slot's contents in the given direction
 -- ("front" (default), "up", or "down" -- matches lib/chestfinder.lua's
 -- returned `direction`). Never touches the reserved home-link slot (see
--- CARGO_SLOTS above) -- this is what's dumping into some OTHER,
--- unrelated chest (a real physical one found by lib/chestfinder.lua),
--- and the home-link chest sitting in inventory at the time isn't cargo
--- to get rid of there. Returns how many slots were emptied. Restores
--- whichever slot was selected beforehand. A slot that fails to drop
--- (destination full, nothing there to drop into) is simply left as-is
--- -- this doesn't retry or hunt for another container, so a chest
--- that's itself full means those items just stay in inventory.
+-- CARGO_SLOTS above), NOR any cargo slot that happens to hold the
+-- home-link chest ITEM itself (see HOMELINK_ITEM_NAME above) -- this is
+-- what's dumping into some OTHER, unrelated chest (a real physical one
+-- found by lib/chestfinder.lua), and the home-link chest isn't cargo to
+-- get rid of there no matter which slot it's currently sitting in.
+-- Returns how many slots were emptied. Restores whichever slot was
+-- selected beforehand. A slot that fails to drop (destination full,
+-- nothing there to drop into) is simply left as-is -- this doesn't
+-- retry or hunt for another container, so a chest that's itself full
+-- means those items just stay in inventory.
 function M.dropAll(direction)
   direction = direction or "front"
   local drop = turtle.drop
@@ -100,7 +120,7 @@ function M.dropAll(direction)
   local originalSlot = turtle.getSelectedSlot()
   local emptied = 0
   for slot = 1, CARGO_SLOTS do
-    if turtle.getItemCount(slot) > 0 then
+    if turtle.getItemCount(slot) > 0 and not isHomelinkChest(slot) then
       turtle.select(slot)
       if drop() then emptied = emptied + 1 end
     end

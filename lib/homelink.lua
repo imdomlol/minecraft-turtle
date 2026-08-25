@@ -35,9 +35,92 @@ M.SLOT = 16
 -- M.place() -- a caller already knows slot 16 is supposed to hold this,
 -- and M.place() trusts that positionally, same as before.
 local ITEM_NAME = "enderstorage:ender_chest"
+local STATE_PATH = "/state/homelink.state"
+local DELTA = {
+  north = { x = 0,  z = -1 },
+  east  = { x = 1,  z = 0 },
+  south = { x = 0,  z = 1 },
+  west  = { x = -1, z = 0 },
+}
 
 local function isProtected(data)
   return data ~= nil and (nav.isChest(data.name) or nav.isComputerCraftBlock(data.name))
+end
+
+local function saveState(data)
+  if not fs.exists("/state") then fs.makeDir("/state") end
+  local f = fs.open(STATE_PATH, "w")
+  f.write(textutils.serializeJSON(data))
+  f.close()
+end
+
+local function loadState()
+  if not fs.exists(STATE_PATH) then return nil end
+  local f = fs.open(STATE_PATH, "r")
+  local text = f.readAll()
+  f.close()
+  local ok, decoded = pcall(textutils.unserializeJSON, text)
+  if ok and type(decoded) == "table" then return decoded end
+  return nil
+end
+
+local function blockPosition(pos, direction)
+  if direction == "up" then
+    return { x = pos.x, y = pos.y + 1, z = pos.z }
+  elseif direction == "down" then
+    return { x = pos.x, y = pos.y - 1, z = pos.z }
+  end
+  local d = DELTA[pos.facing] or { x = 0, z = 0 }
+  return { x = pos.x + d.x, y = pos.y, z = pos.z + d.z }
+end
+
+local function markPlaced(direction, gpsOk, gpsInfo)
+  local pos = nav.getPosition()
+  local marker = {
+    status = "placed",
+    direction = direction,
+    turtle = {
+      x = pos.x, y = pos.y, z = pos.z,
+      heading = pos.heading,
+      facing = pos.facing,
+      gpsFixed = pos.gpsFixed,
+      source = pos.source,
+    },
+    chest = blockPosition(pos, direction),
+    gps = {
+      attempted = true,
+      ok = gpsOk == true,
+      result = gpsInfo,
+    },
+    at = os.epoch and os.epoch("utc") or os.clock(),
+  }
+  saveState(marker)
+  return marker
+end
+
+local function markPickup(status, reason)
+  local pos = nav.getPosition()
+  local previous = loadState() or {}
+  previous.status = status
+  previous.reason = reason
+  previous.turtle = {
+    x = pos.x, y = pos.y, z = pos.z,
+    heading = pos.heading,
+    facing = pos.facing,
+    gpsFixed = pos.gpsFixed,
+    source = pos.source,
+  }
+  previous.updatedAt = os.epoch and os.epoch("utc") or os.clock()
+  saveState(previous)
+end
+
+function M.getState()
+  return loadState()
+end
+
+local function placed(direction, gpsOk, gpsInfo)
+  markPlaced(direction, gpsOk, gpsInfo)
+  return direction
 end
 
 -- Tries front, then up, then down, and places the chest in whichever
@@ -60,26 +143,27 @@ function M.place()
   if turtle.getItemCount(M.SLOT) == 0 then
     return nil, "no home-link chest in slot " .. M.SLOT
   end
+  local gpsOk, gpsInfo = nav.reacquireGPS()
   turtle.select(M.SLOT)
 
-  if turtle.place() then return "front" end
-  if turtle.placeUp() then return "up" end
-  if turtle.placeDown() then return "down" end
+  if turtle.place() then return placed("front", gpsOk, gpsInfo) end
+  if turtle.placeUp() then return placed("up", gpsOk, gpsInfo) end
+  if turtle.placeDown() then return placed("down", gpsOk, gpsInfo) end
 
   local found, data = turtle.inspect()
   if found and not isProtected(data) and turtle.dig() then
     turtle.select(M.SLOT)
-    if turtle.place() then return "front" end
+    if turtle.place() then return placed("front", gpsOk, gpsInfo) end
   end
   found, data = turtle.inspectUp()
   if found and not isProtected(data) and turtle.digUp() then
     turtle.select(M.SLOT)
-    if turtle.placeUp() then return "up" end
+    if turtle.placeUp() then return placed("up", gpsOk, gpsInfo) end
   end
   found, data = turtle.inspectDown()
   if found and not isProtected(data) and turtle.digDown() then
     turtle.select(M.SLOT)
-    if turtle.placeDown() then return "down" end
+    if turtle.placeDown() then return placed("down", gpsOk, gpsInfo) end
   end
 
   return nil, "no open space to place the home-link chest (front/up/down all blocked, protected, or undiggable)"
@@ -110,8 +194,37 @@ function M.pickUp(direction)
   if direction == "up" then dig = turtle.digUp
   elseif direction == "down" then dig = turtle.digDown end
 
+  local function isChest(slot)
+    local detail = turtle.getItemDetail(slot)
+    return detail ~= nil and detail.name == ITEM_NAME
+  end
+
+  local function dropAwayFromChest()
+    if direction ~= "down" then return turtle.dropDown() end
+    return turtle.drop()
+  end
+
+  local function firstEmptySlot(except)
+    for slot = 1, 16 do
+      if slot ~= except and turtle.getItemCount(slot) == 0 then
+        return slot
+      end
+    end
+    return nil
+  end
+
   local before = {}
   for slot = 1, 16 do before[slot] = turtle.getItemCount(slot) end
+
+  local slotDetail = turtle.getItemDetail(M.SLOT)
+  if slotDetail and slotDetail.name ~= ITEM_NAME then
+    turtle.select(M.SLOT)
+    dropAwayFromChest()
+    if turtle.getItemCount(M.SLOT) > 0 and not firstEmptySlot(M.SLOT) then
+      return false, "not picking the home-link chest up while slot " .. M.SLOT
+        .. " is blocked and no spare slot is available"
+    end
+  end
 
   turtle.select(M.SLOT)
   local ok, reason = dig()
@@ -119,12 +232,8 @@ function M.pickUp(direction)
     return false, "could not pick the home-link chest back up: " .. tostring(reason)
   end
 
-  local function isChest(slot)
-    local detail = turtle.getItemDetail(slot)
-    return detail ~= nil and detail.name == ITEM_NAME
-  end
-
   if turtle.getItemCount(M.SLOT) > before[M.SLOT] and isChest(M.SLOT) then
+    markPickup("picked_up")
     return true
   end
 
@@ -134,14 +243,34 @@ function M.pickUp(direction)
   -- stranded in the wrong place or accept a false positive.
   for slot = 1, 16 do
     if slot ~= M.SLOT and turtle.getItemCount(slot) > (before[slot] or 0) and isChest(slot) then
+      if turtle.getItemCount(M.SLOT) > 0 and not isChest(M.SLOT) then
+        local spare = firstEmptySlot(slot)
+        if not spare then
+          markPickup("pickup_failed", "slot " .. M.SLOT .. " blocked and no spare slot is available")
+          return false, "dug the home-link chest into slot " .. slot
+            .. " but slot " .. M.SLOT .. " is blocked and no spare slot is available"
+        end
+        turtle.select(M.SLOT)
+        if not turtle.transferTo(spare) then
+          markPickup("pickup_failed", "could not clear blocked slot " .. M.SLOT)
+          return false, "dug the home-link chest into slot " .. slot
+            .. " but could not clear blocked slot " .. M.SLOT
+        end
+      end
       turtle.select(slot)
-      turtle.transferTo(M.SLOT)
+      if not turtle.transferTo(M.SLOT) then
+        markPickup("pickup_failed", "could not move recovered chest back to slot " .. M.SLOT)
+        return false, "dug the home-link chest into slot " .. slot
+          .. " but could not move it back to slot " .. M.SLOT
+      end
       if isChest(M.SLOT) then
+        markPickup("picked_up", "recovered from slot " .. slot)
         return true, "recovered from slot " .. slot .. " instead of landing directly in " .. M.SLOT
       end
     end
   end
 
+  markPickup("pickup_failed", "dug chest but no ender chest item appeared in inventory")
   return false, "dug the home-link chest but it never reappeared in inventory -- may be lost"
 end
 
