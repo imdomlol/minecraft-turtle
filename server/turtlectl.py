@@ -17,6 +17,11 @@ Usage:
   turtlectl.py send-fleet <controller> <command...>   -- every turtle behind one controller
   turtlectl.py results <controller> [-n N]
   turtlectl.py watch <controller>
+  turtlectl.py clearqueue <controller>  -- discard every currently-queued
+                         (not yet delivered) command -- e.g. after a
+                         controller was stuck/unreachable for a while and
+                         you'd rather it come back idle than work through
+                         a long backlog of stale commands
   turtlectl.py console <controller> [--silent]   -- live screen feed; type a command + enter to send it
                                        (always reflows a turtle's screen-wrapped lines back
                                        into one, and always drops this console's own
@@ -828,6 +833,10 @@ def main():
     wp = sub.add_parser("watch", help="Live-tail a controller's results.")
     wp.add_argument("controller")
 
+    cqp = sub.add_parser("clearqueue", help="Discard every currently-queued (not yet delivered) "
+                                             "command for a controller.")
+    cqp.add_argument("controller")
+
     wep = sub.add_parser("worldexport", help="Pull the controller's whole recorded world map to a local JSON file.")
     wep.add_argument("controller")
     wep.add_argument("outfile", nargs="?", default="world_export.json",
@@ -1096,6 +1105,10 @@ def main():
         except KeyboardInterrupt:
             pass
 
+    elif args.cmd == "clearqueue":
+        res = request(f"{url}/clear_queue?id={args.controller}", args.token, "POST", {})
+        print(f"cleared {res['cleared']} queued command(s) for controller {args.controller}")
+
     elif args.cmd == "worldexport":
         cmd_worldexport(url, args)
 
@@ -1317,16 +1330,27 @@ def main():
             for line in lines:
                 process_line(line)
 
-        def send_bookkeeping(command):
+        def send_bookkeeping(command, tag=None):
             """Fire-and-forget: a missed connect/disconnect heartbeat just
             gets retried on the next tick (or never matters again, for a
             disconnect), so failures here are silently swallowed rather
             than interrupting the console session the way request()'s
-            sys.exit(1) would."""
+            sys.exit(1) would.
+
+            `tag` (see relay.py's own /cmd doc): both call sites below pass
+            "heartbeat", so a controller that's slow or stuck to poll never
+            accumulates more than the ONE most recent connect()/disconnect()
+            behind it -- confirmed live, without this a controller stuck for
+            hours accumulated one queued heartbeat per tick indefinitely,
+            eventually burying every real command behind well over a
+            thousand of them."""
             try:
+                body = {"command": command}
+                if tag:
+                    body["tag"] = tag
                 req = urllib.request.Request(
                     f"{url}/cmd?id={args.controller}",
-                    data=json.dumps({"command": command}).encode("utf-8"),
+                    data=json.dumps(body).encode("utf-8"),
                     method="POST",
                 )
                 req.add_header("Authorization", f"Bearer {args.token}")
@@ -1369,12 +1393,12 @@ def main():
                 # own header comment for why this isn't persisted state.
                 now = time.time()
                 if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-                    send_bookkeeping('dofile("/dom-main/controller/mode.lua").connect()')
+                    send_bookkeeping('dofile("/dom-main/controller/mode.lua").connect()', tag="heartbeat")
                     last_heartbeat = now
 
                 stop.wait(1)
 
-        send_bookkeeping('dofile("/dom-main/controller/mode.lua").connect()')
+        send_bookkeeping('dofile("/dom-main/controller/mode.lua").connect()', tag="heartbeat")
 
         poller = threading.Thread(target=poll_loop, daemon=True)
         poller.start()
@@ -1442,7 +1466,7 @@ def main():
             stop.set()
             flush_all()  # don't lose a still-accumulating wrapped line at session end
             sys.stdout.flush()
-            send_bookkeeping('dofile("/dom-main/controller/mode.lua").disconnect()')
+            send_bookkeeping('dofile("/dom-main/controller/mode.lua").disconnect()', tag="heartbeat")
 
     elif args.cmd in SHORTCUT_NAMES:
         description, inner = build_shortcut(args.cmd, args)

@@ -8,8 +8,19 @@ Turtles post  POST /log {id, text}                   append to the live console 
 Turtles post  POST /blocks {id, entries}             ship newly-observed world blocks
 
 Operators (via turtlectl.py or curl) use:
-  POST /cmd?id=<id>   {command}   queue a command for one turtle
+  POST /cmd?id=<id>   {command, tag?}  queue a command for one turtle -- an
+                                       optional `tag` drops any earlier
+                                       still-queued command with the same
+                                       tag first, so a repeating fire-and-
+                                       forget command (a console session's
+                                       connect() heartbeat, say) can never
+                                       pile up behind a controller that's
+                                       stuck or slow to poll -- each new
+                                       one just supersedes the last
   POST /cmd_all       {command}   queue a command for every known turtle
+  POST /clear_queue?id=<id>       discard every currently-queued command
+                                   for one turtle (nothing already
+                                   delivered/running is affected)
   GET  /status                    list turtles and when they last checked in
   GET  /results?id=<id>           recent results for one turtle
   GET  /log?id=<id>&after=<n>     live console feed since offset n
@@ -127,6 +138,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_cmd(params.get("id"), body)
         if path == "/cmd_all":
             return self._handle_cmd_all(body)
+        if path == "/clear_queue":
+            return self._handle_clear_queue(params.get("id"))
         return self._send_json(404, {"error": "not found"})
 
     def do_GET(self):
@@ -235,11 +248,37 @@ class Handler(BaseHTTPRequestHandler):
         command = body.get("command")
         if not command:
             return self._send_json(400, {"error": "missing command"})
+        tag = body.get("tag")
         cmd_id = next_cmd_id()
         with lock:
-            state["queue"].setdefault(tid, []).append({"cmd_id": cmd_id, "command": command})
+            queue = state["queue"].setdefault(tid, [])
+            if tag:
+                # Confirmed live: a console session's connect() heartbeat
+                # (turtlectl.py's `console` command, one every ~10s for as
+                # long as the session stays open) kept queuing while the
+                # controller was stuck/unresponsive, piling up over a
+                # thousand deep and starving every real command behind
+                # them. A tagged command drops any earlier one still
+                # sitting here with the same tag before queuing itself --
+                # only the most recent heartbeat (or whatever else opts
+                # into a tag) is ever actually waiting, no matter how long
+                # the controller takes to come back for it.
+                queue[:] = [c for c in queue if c.get("tag") != tag]
+            entry = {"cmd_id": cmd_id, "command": command}
+            if tag:
+                entry["tag"] = tag
+            queue.append(entry)
             save_state()
         return self._send_json(200, {"cmd_id": cmd_id})
+
+    def _handle_clear_queue(self, tid):
+        if not tid:
+            return self._send_json(400, {"error": "missing id query param"})
+        with lock:
+            cleared = len(state["queue"].get(tid, []))
+            state["queue"][tid] = []
+            save_state()
+        return self._send_json(200, {"cleared": cleared})
 
     def _handle_cmd_all(self, body):
         command = body.get("command")
