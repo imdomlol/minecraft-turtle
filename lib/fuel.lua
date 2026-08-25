@@ -61,6 +61,19 @@ function M.hasFuel(minLevel)
   return level == "unlimited" or level >= minLevel
 end
 
+-- The most fuel this turtle can ever hold -- turtle.getFuelLimit()'s own
+-- real value (20,000 for a plain Turtle, 100,000 for an Advanced one),
+-- or "unlimited" if this world has fuel disabled entirely, never a
+-- hardcoded guess at which tier a given turtle happens to be. Read at
+-- call time rather than cached -- cheap, and never changes mid-run
+-- anyway. M.hasFuel()/M.ensureFuel() already treat "unlimited" as
+-- always-satisfied regardless of the target level, so
+-- M.ensureFuel(M.maxFuel()) is always safe to call even on an
+-- unlimited-fuel turtle.
+function M.maxFuel()
+  return turtle.getFuelLimit()
+end
+
 -- Manhattan distance between two {x,y,z} positions -- the number of
 -- individual moves a direct trip between them costs, since every
 -- successful forward/up/down/back move burns exactly 1 fuel regardless
@@ -157,6 +170,29 @@ local function drain(inspect, suck, minLevel)
     if not suck() then return end
     if refuelAllSlots(minLevel) then return end
   end
+end
+
+-- Sucks from `suck` (e.g. turtle.suck/suckUp/suckDown) and refuels from
+-- whatever comes in, stopping once minLevel is reached or the source
+-- stops producing anything -- the same suck+refuelAllSlots loop
+-- M.ensureFuel()'s own private drain() uses against a chest it first
+-- verified LOOKS like a chest by name (looksLikeChest() above), but
+-- usable directly by a caller that already knows FOR CERTAIN what's in
+-- that direction -- e.g. lib/homelink.lua's shared home-link Ender
+-- Chest, whose real block name isn't guaranteed to contain "chest" at
+-- all depending on the mod's exact registry ID (EnderStorage's is not a
+-- vanilla-style name). Skips that name check entirely rather than risk
+-- silently refusing to pull from a real, known-good fuel source just
+-- because it doesn't happen to match a generic heuristic. Bounded the
+-- same way (16 attempts, matching inventory size).
+function M.refuelFrom(suck, minLevel)
+  minLevel = minLevel or 1
+  if M.hasFuel(minLevel) then return true end
+  for _ = 1, 16 do
+    if not suck() then break end
+    if refuelAllSlots(minLevel) then return true end
+  end
+  return M.hasFuel(minLevel)
 end
 
 function M.ensureFuel(minLevel)

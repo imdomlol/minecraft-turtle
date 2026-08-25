@@ -66,13 +66,19 @@
   before each pass starts (so a full inventory is caught within a single
   leg rather than potentially waiting out an entire deep pass, but a
   pass also never starts already full). If full and `tidy` (see below)
-  is true, it finds a chest (see lib/chestfinder.lua -- defaults to
-  searching around lib/home.lua's position), drops everything in, and
-  returns to the exact position/heading it was at before continuing. If
-  no chest can be found, or the one found is itself too full to take
-  everything, the whole job stops -- even if this happened mid-leg, deep
-  inside a pass -- rather than quietly discarding items or looping
-  forever hunting for space.
+  is true, it FIRST tries the shared home-link Ender Chest a turtle
+  carries in slot 16 (see lib/homelink.lua) -- placed wherever mining
+  currently is, so unlike everything else here it never requires
+  traveling anywhere, and tops off fuel as a free side effect too. Only
+  if that's unavailable (no chest given yet, nowhere open to place it,
+  or it's genuinely missing) does it fall back to the old behavior:
+  finds a real chest (see lib/chestfinder.lua -- defaults to searching
+  around lib/home.lua's position), drops everything in, and returns to
+  the exact position/heading it was at before continuing. If neither
+  path works -- no home-link chest AND no real chest can be found, or
+  the one found is itself too full to take everything -- the whole job
+  stops -- even if this happened mid-leg, deep inside a pass -- rather
+  than quietly discarding items or looping forever hunting for space.
 
   Three optional boolean modes, all default true:
   - tidy: the inventory-unloading behavior described above. tidy = false
@@ -108,6 +114,7 @@ local routing = dofile("/lib/routing.lua")
 local home = dofile("/lib/home.lua")
 local inventory = dofile("/lib/inventory.lua")
 local chestfinder = dofile("/lib/chestfinder.lua")
+local homelink = dofile("/lib/homelink.lua")
 local ores = dofile("/lib/ores.lua")
 local fuel = dofile("/lib/fuel.lua")
 local job = dofile("/lib/job.lua")
@@ -468,12 +475,57 @@ local MAX_CHESTS_PER_UNLOAD = 20
 -- around that SAME original chestPos (not wherever the turtle ends up
 -- after the first drop) -- the designated chest area, not "somewhere
 -- near the last chest".
+-- Maps a lib/homelink.lua direction to the matching turtle.suck*()
+-- function -- used with lib/fuel.lua's M.refuelFrom() below, NOT
+-- M.ensureFuel(): ensureFuel()'s own drain() only pulls from a
+-- direction whose block NAME looks like "chest", and the home-link
+-- Ender Chest's real registry name isn't guaranteed to contain that
+-- substring at all -- confirmed while testing this integration:
+-- ensureFuel() silently refused to pull from it. M.refuelFrom() skips
+-- that name check entirely, which is safe here specifically because
+-- M.place() just confirmed for certain what's actually in that
+-- direction (this turtle placed it itself, one line above).
+local SUCK_BY_DIRECTION = { front = turtle.suck, up = turtle.suckUp, down = turtle.suckDown }
+
+-- Tries the shared home-link Ender Chest (see lib/homelink.lua) before
+-- ever falling back to the travel-based chestfinder search below. A
+-- turtle carrying one can unload AND refuel without leaving wherever it
+-- currently is -- place it in whichever direction is open, drop
+-- everything in, top off fuel as far as the chest currently has stock
+-- for (best-effort: running the chest's coal supply dry is the chest's
+-- problem, not a reason to fail this), then pick it back up. Returns
+-- true only once the chest is confirmed safely back in inventory; false,
+-- reason for anything else (no chest in slot 16 yet, nowhere open to
+-- place it, or -- rare and serious -- it never reappeared after being
+-- dug back up), which the caller falls back on rather than treating as
+-- fatal on its own -- the old chestfinder path still works regardless of
+-- whether this turtle has been given a home-link chest at all.
+local function tryHomeLink()
+  local direction, placeErr = homelink.place()
+  if not direction then
+    return false, placeErr
+  end
+
+  inventory.dropAll(direction)
+  fuel.refuelFrom(SUCK_BY_DIRECTION[direction], fuel.maxFuel())
+
+  local ok, pickErr = homelink.pickUp(direction)
+  if not ok then
+    return false, pickErr
+  end
+  return true
+end
+
 local function unloadIfFull(tidy, chestPos)
   if not inventory.isFull() then return true end
 
   if not tidy then
     return false, "inventory full (tidy disabled)"
   end
+
+  local homeOk, homeErr = tryHomeLink()
+  if homeOk then return true end
+  print("vertical: home-link unload/refuel unavailable (" .. tostring(homeErr) .. ") -- falling back to chestfinder")
 
   local origin = nav.getPosition()
   print("vertical: inventory full, looking for a chest to unload into")
@@ -841,9 +893,30 @@ function M.run(params, shouldStop)
     local minFuel = effectiveMinFuel()
     local fuelLevel = turtle.getFuelLevel()
     if fuelLevel == "unlimited" or fuelLevel >= minFuel then return true end
+
     fuel.ensureFuel(minFuel)
     fuelLevel = turtle.getFuelLevel()
     minFuel = effectiveMinFuel()
+    if fuelLevel == "unlimited" or fuelLevel >= minFuel then return true end
+
+    -- Still short after checking whatever's already immediately
+    -- adjacent (fuel.ensureFuel() above) -- try the home-link chest
+    -- right here (see tryHomeLink() above) before falling through to
+    -- the "insufficient fuel" stop below, which hands this off to
+    -- dom-main/controller/scheduler.lua's rescue system. This is the
+    -- integration point that matters most for staying out mining far
+    -- longer: unlike the inventory-full trigger elsewhere in this file,
+    -- fuel can run low well before cargo fills up, and this is what
+    -- keeps that from ending the job at all when a home-link chest is
+    -- available. Also empties whatever cargo's accumulated so far as a
+    -- free side effect, same as any other home-link stop.
+    local homeOk, homeErr = tryHomeLink()
+    if homeOk then
+      fuelLevel = turtle.getFuelLevel()
+      minFuel = effectiveMinFuel()
+    else
+      print("vertical: home-link refuel unavailable (" .. tostring(homeErr) .. ")")
+    end
     return fuelLevel == "unlimited" or fuelLevel >= minFuel
   end
 

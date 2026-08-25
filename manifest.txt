@@ -44,6 +44,7 @@ lib/home.lua
 lib/chestfinder.lua
 lib/rescue.lua
 lib/inventory.lua
+lib/homelink.lua
 lib/identity.lua
 lib/champions.lua
 lib/ores.lua
