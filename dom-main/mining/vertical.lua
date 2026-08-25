@@ -516,8 +516,22 @@ local function tryHomeLink()
   -- first means M.refuelFrom() only ever sees whatever the chest
   -- already had (ideally just AE2-stocked coal) before this turtle
   -- adds anything of its own to it.
-  fuel.refuelFrom(SUCK_BY_DIRECTION[direction], fuel.maxFuel())
-  inventory.dropAll(direction)
+  homelink.blackboxInspect("transfer.inspect_expected_block_before_refuel", direction)
+  homelink.blackboxSlot("transfer.slot16_before_refuel", homelink.SLOT)
+  local fuelBefore = turtle.getFuelLevel()
+  local refueled = fuel.refuelFrom(SUCK_BY_DIRECTION[direction], fuel.maxFuel())
+  homelink.blackbox("transfer.refuel_from_home_link", {
+    ok = refueled == true,
+    fuelBefore = fuelBefore,
+    fuelAfter = turtle.getFuelLevel(),
+  })
+
+  homelink.blackboxInspect("transfer.inspect_expected_block_before_deposit", direction)
+  homelink.blackboxSlot("transfer.slot16_before_deposit", homelink.SLOT)
+  local dropped = inventory.dropAll(direction)
+  homelink.blackbox("transfer.deposit_to_home_link", { emptiedSlots = dropped })
+  homelink.blackboxInspect("transfer.inspect_expected_block_after_deposit", direction)
+  homelink.blackboxSlot("transfer.slot16_after_deposit", homelink.SLOT)
 
   local ok, pickErr = homelink.pickUp(direction)
   if not ok then

@@ -37,15 +37,92 @@ M.SLOT = 16
 -- and M.place() trusts that positionally, same as before.
 local ITEM_NAME = "enderstorage:ender_chest"
 local STATE_PATH = "/state/homelink.state"
+local BLACKBOX_PATH = "/state/homelink_blackbox.state"
 local DELTA = {
   north = { x = 0,  z = -1 },
   east  = { x = 1,  z = 0 },
   south = { x = 0,  z = 1 },
   west  = { x = -1, z = 0 },
 }
+local blackbox
+local inspectDirection
 
 local function isProtected(data)
   return data ~= nil and (nav.isChest(data.name) or nav.isComputerCraftBlock(data.name))
+end
+
+local function now()
+  return os.epoch and os.epoch("utc") or os.clock()
+end
+
+local function safeDetail(slot)
+  local detail = turtle.getItemDetail(slot)
+  if not detail then return { slot = slot, empty = true } end
+  return { slot = slot, name = detail.name, count = detail.count }
+end
+
+local function safeInspect(direction)
+  local found, data = inspectDirection(direction)
+  if not found then return { direction = direction, present = false } end
+  return { direction = direction, present = true, name = data.name, state = data.state }
+end
+
+local function hasEnderChest(value)
+  if type(value) ~= "table" then return value == ITEM_NAME end
+  if value.name == ITEM_NAME then return true end
+  for _, child in pairs(value) do
+    if hasEnderChest(child) then return true end
+  end
+  return false
+end
+
+local function saveBlackbox()
+  if not (blackbox and blackbox.sawEnderChest) then return end
+  if not fs.exists("/state") then fs.makeDir("/state") end
+  local f = fs.open(BLACKBOX_PATH, "w")
+  f.write(textutils.serializeJSON(blackbox))
+  f.close()
+end
+
+local function beginBlackbox(reason)
+  blackbox = {
+    reason = reason,
+    startedAt = now(),
+    events = {},
+    sawEnderChest = false,
+  }
+end
+
+function M.blackbox(event, data)
+  if not blackbox then beginBlackbox("implicit") end
+  local entry = { at = now(), event = event, data = data }
+  blackbox.events[#blackbox.events + 1] = entry
+  if hasEnderChest(data) then blackbox.sawEnderChest = true end
+  saveBlackbox()
+end
+
+function M.getBlackbox()
+  if not fs.exists(BLACKBOX_PATH) then return nil end
+  local f = fs.open(BLACKBOX_PATH, "r")
+  local text = f.readAll()
+  f.close()
+  local ok, decoded = pcall(textutils.unserializeJSON, text)
+  if ok and type(decoded) == "table" then return decoded end
+  return nil
+end
+
+function M.blackboxSlot(label, slot)
+  M.blackbox(label, safeDetail(slot))
+end
+
+function M.blackboxInspect(label, direction)
+  M.blackbox(label, safeInspect(direction))
+end
+
+function M.blackboxInventory(label)
+  local items = {}
+  for slot = 1, 16 do items[#items + 1] = safeDetail(slot) end
+  M.blackbox(label, items)
 end
 
 function M.isItem(slot)
@@ -184,10 +261,12 @@ end
 
 local function placed(direction, gpsOk, gpsInfo)
   markPlaced(direction, gpsOk, gpsInfo)
+  M.blackbox("place.succeeded", { direction = direction, gpsOk = gpsOk == true, gpsInfo = gpsInfo })
+  M.blackboxInspect("place.inspect_expected_block_after_place", direction)
   return direction
 end
 
-local function inspectDirection(direction)
+inspectDirection = function(direction)
   if direction == "up" then return turtle.inspectUp() end
   if direction == "down" then return turtle.inspectDown() end
   return turtle.inspect()
@@ -232,32 +311,44 @@ end
 -- protected. Returns the direction it succeeded in ("front", "up", or
 -- "down").
 function M.place()
+  beginBlackbox("home-link place/use/pickup attempt")
+  M.blackboxSlot("place.slot16_before_place", M.SLOT)
   if not M.isItem(M.SLOT) then
     local normalized = M.normalizeInventory()
+    M.blackbox("place.normalize_inventory", { ok = normalized == true })
+    M.blackboxSlot("place.slot16_after_normalize", M.SLOT)
     if not normalized then
       return nil, "no home-link chest in slot " .. M.SLOT
     end
   end
   local gpsOk, gpsInfo = nav.reacquireGPS()
+  M.blackbox("place.gps_reacquire", { ok = gpsOk == true, result = gpsInfo })
   turtle.select(M.SLOT)
+  M.blackbox("place.select_slot16", { selected = turtle.getSelectedSlot() })
 
   if turtle.place() then return placed("front", gpsOk, gpsInfo) end
   if turtle.placeUp() then return placed("up", gpsOk, gpsInfo) end
   if turtle.placeDown() then return placed("down", gpsOk, gpsInfo) end
 
   local found, data = turtle.inspect()
+  M.blackbox("place.front_blocked", { found = found, name = found and data.name or nil })
   if found and not isProtected(data) and turtle.dig() then
     turtle.select(M.SLOT)
+    M.blackbox("place.front_cleared_for_retry", { selected = turtle.getSelectedSlot() })
     if turtle.place() then return placed("front", gpsOk, gpsInfo) end
   end
   found, data = turtle.inspectUp()
+  M.blackbox("place.up_blocked", { found = found, name = found and data.name or nil })
   if found and not isProtected(data) and turtle.digUp() then
     turtle.select(M.SLOT)
+    M.blackbox("place.up_cleared_for_retry", { selected = turtle.getSelectedSlot() })
     if turtle.placeUp() then return placed("up", gpsOk, gpsInfo) end
   end
   found, data = turtle.inspectDown()
+  M.blackbox("place.down_blocked", { found = found, name = found and data.name or nil })
   if found and not isProtected(data) and turtle.digDown() then
     turtle.select(M.SLOT)
+    M.blackbox("place.down_cleared_for_retry", { selected = turtle.getSelectedSlot() })
     if turtle.placeDown() then return placed("down", gpsOk, gpsInfo) end
   end
 
@@ -298,22 +389,32 @@ function M.pickUp(direction)
     return turtle.drop()
   end
 
+  M.blackboxInspect("pickup.inspect_expected_block_before_cleanup", direction)
+  M.blackboxSlot("pickup.slot16_before_cleanup", M.SLOT)
   local slotDetail = turtle.getItemDetail(M.SLOT)
   if slotDetail and slotDetail.name ~= ITEM_NAME then
     turtle.select(M.SLOT)
-    dropAwayFromChest()
+    local dropped = dropAwayFromChest()
+    M.blackbox("pickup.slot16_wrong_item_drop_away", {
+      item = { name = slotDetail.name, count = slotDetail.count },
+      dropped = dropped == true,
+    })
     if turtle.getItemCount(M.SLOT) > 0 then
       local spare = firstEmptySlot(M.SLOT)
+      M.blackbox("pickup.slot16_still_blocked_after_drop", { spare = spare })
       if not spare then
         return false, "not picking the home-link chest up while slot " .. M.SLOT
           .. " is blocked and no spare slot is available"
       end
-      if not turtle.transferTo(spare) then
+      local moved = turtle.transferTo(spare)
+      M.blackbox("pickup.slot16_wrong_item_moved_to_spare", { spare = spare, moved = moved == true })
+      if not moved then
         return false, "not picking the home-link chest up because slot " .. M.SLOT
           .. " could not be cleared"
       end
     end
   end
+  M.blackboxSlot("pickup.slot16_after_cleanup", M.SLOT)
 
   -- Confirmed live (4 of 6 turtles, same night, same exact failure):
   -- dig() can report success (the block broke) while no ender chest item
@@ -329,6 +430,10 @@ function M.pickUp(direction)
   -- forensics -- see markPickup() calls below.
   local preDigFound, preDigData = inspectDirection(direction)
   local preDigName = preDigFound and preDigData.name or nil
+  M.blackbox("pickup.inspect_expected_block_before_dig", {
+    found = preDigFound == true,
+    name = preDigName,
+  })
   if not (preDigFound and nav.isChest(preDigName)) then
     markPickup("pickup_failed", "expected chest not present before digging (saw: "
       .. tostring(preDigName or "nothing") .. ")", { preDig = preDigName or false })
@@ -340,12 +445,22 @@ function M.pickUp(direction)
   for slot = 1, 16 do before[slot] = turtle.getItemCount(slot) end
 
   turtle.select(M.SLOT)
+  M.blackbox("pickup.select_slot16_before_dig", {
+    selected = turtle.getSelectedSlot(),
+    empty = turtle.getItemCount(M.SLOT) == 0,
+  })
   local ok, reason = dig()
+  M.blackbox("pickup.dig_expected_block", { ok = ok == true, reason = reason })
   if not ok then
     return false, "could not pick the home-link chest back up: " .. tostring(reason)
   end
 
+  M.blackboxSlot("pickup.slot16_after_dig", M.SLOT)
+  M.blackboxInventory("pickup.inventory_after_dig")
+  M.blackboxInspect("pickup.inspect_expected_location_after_dig", direction)
   if turtle.getItemCount(M.SLOT) > before[M.SLOT] and isChest(M.SLOT) then
+    M.blackboxSlot("pickup.slot16_direct_success", M.SLOT)
+    M.blackboxInspect("pickup.inspect_expected_location_direct_success", direction)
     markPickup("picked_up")
     return true
   end
@@ -356,6 +471,10 @@ function M.pickUp(direction)
   -- stranded in the wrong place or accept a false positive.
   for slot = 1, 16 do
     if slot ~= M.SLOT and turtle.getItemCount(slot) > (before[slot] or 0) and isChest(slot) then
+      M.blackbox("pickup.found_ender_chest_in_other_slot", {
+        slot = slot,
+        count = turtle.getItemCount(slot),
+      })
       if turtle.getItemCount(M.SLOT) > 0 and not isChest(M.SLOT) then
         if not clearReservedSlot(slot) then
           markPickup("pickup_failed", "slot " .. M.SLOT .. " blocked and no spare slot is available")
@@ -364,11 +483,15 @@ function M.pickUp(direction)
         end
       end
       turtle.select(slot)
-      if not turtle.transferTo(M.SLOT) then
+      local moved = turtle.transferTo(M.SLOT)
+      M.blackbox("pickup.move_recovered_chest_to_slot16", { from = slot, moved = moved == true })
+      if not moved then
         markPickup("pickup_failed", "could not move recovered chest back to slot " .. M.SLOT)
         return false, "dug the home-link chest into slot " .. slot
           .. " but could not move it back to slot " .. M.SLOT
       end
+      M.blackboxInventory("pickup.inventory_after_recovered_from_other_slot")
+      M.blackboxInspect("pickup.inspect_expected_location_after_other_slot_recovery", direction)
       if isChest(M.SLOT) then
         markPickup("picked_up", "recovered from slot " .. slot)
         return true, "recovered from slot " .. slot .. " instead of landing directly in " .. M.SLOT
@@ -396,6 +519,8 @@ function M.pickUp(direction)
           turtle.select(slot)
           turtle.transferTo(M.SLOT)
         end
+        M.blackboxInventory("pickup.inventory_after_floor_recovery_move")
+        M.blackboxInspect("pickup.inspect_expected_location_after_floor_recovery", direction)
         if isChest(M.SLOT) then
           markPickup("picked_up", "recovered from the floor after dig() alone didn't collect it")
           return true, "recovered from the floor (not collected directly by dig())"
@@ -404,6 +529,8 @@ function M.pickUp(direction)
     end
   end
 
+  M.blackboxInventory("pickup.inventory_final_failure_scan")
+  M.blackboxInspect("pickup.inspect_expected_location_final_failure", direction)
   markPickup("pickup_failed", "confirmed a real chest was dug (preDig saw " .. tostring(preDigName)
     .. ") but no ender chest item ever appeared in inventory, including after a floor-pickup retry -- genuinely lost",
     { preDig = preDigName, floorRetry = true })
