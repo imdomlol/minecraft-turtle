@@ -30,8 +30,12 @@ Usage:
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
   turtlectl.py mode <controller> [idle|passive|aggressive]  -- get or set the autopilot mode
   turtlectl.py version <controller> [N] [--bump]  -- get or set the controller's code version
-  turtlectl.py worksite <controller> [minX minZ maxX maxZ y capacity]
-                         -- get (no args) or set the current mining worksite's bounds/height/capacity
+  turtlectl.py addzone <controller> <minX> <minZ> <maxX> <maxZ> <y> <capacity> [height]
+                         -- add a mining zone -- height caps blocks descended per pass
+                         (targets a specific Y-band instead of digging to bedrock)
+  turtlectl.py removezone <controller> <index>  -- remove a zone (see `zones` for its index)
+  turtlectl.py zones <controller>     -- list every configured zone; the fleet balances
+                         evenly across all zones with room, not fill-one-then-overflow
   turtlectl.py addchest <controller> <x> <y> <z> [maxX maxY maxZ]
                          -- add a chest location (or, with maxX/Y/Z, a range) turtles can unload/refuel at
   turtlectl.py removechest <controller> <index>  -- remove a configured chest (see `chests` for its index)
@@ -493,18 +497,22 @@ def build_shortcut(cmd, ns):
             return f"set version to {ns.n}", f'return dofile("/dom-main/controller/version.lua").set({ns.n})'
         return "current version", 'return dofile("/dom-main/controller/version.lua").get()'
 
-    if cmd == "worksite":
+    if cmd == "addzone":
         fields = [ns.minX, ns.minZ, ns.maxX, ns.maxZ, ns.y, ns.capacity]
-        if all(f is None for f in fields):
-            return "current worksite", 'return dofile("/dom-main/controller/worksite.lua").get()'
-        if any(f is None for f in fields):
-            print("error: worksite needs all of minX minZ maxX maxZ y capacity, "
-                  "or none of them (to just view it)", file=sys.stderr)
-            sys.exit(1)
         args_str = ", ".join(str(f) for f in fields)
-        command = f'return dofile("/dom-main/controller/worksite.lua").set({args_str})'
-        description = f"set worksite ({ns.minX},{ns.minZ})-({ns.maxX},{ns.maxZ}) y={ns.y} capacity={ns.capacity}"
+        if ns.height is not None:
+            args_str += f", {ns.height}"
+        command = f'return dofile("/dom-main/controller/worksite.lua").addZone({args_str})'
+        description = f"add zone ({ns.minX},{ns.minZ})-({ns.maxX},{ns.maxZ}) y={ns.y} capacity={ns.capacity}"
+        if ns.height is not None:
+            description += f" height={ns.height}"
         return description, command
+
+    if cmd == "removezone":
+        return f"remove zone #{ns.index}", f'return dofile("/dom-main/controller/worksite.lua").removeZone({ns.index})'
+
+    if cmd == "zones":
+        return "configured zones", 'return dofile("/dom-main/controller/worksite.lua").listZones()'
 
     if cmd == "addchest":
         fields = [ns.x, ns.y, ns.z, ns.maxX, ns.maxY, ns.maxZ]
@@ -538,7 +546,10 @@ TURTLE_SHORTCUTS = {
     "goto", "mine", "stop", "jobstatus", "pos", "setpos", "gpsfix", "turnleft", "turnright",
     "inv", "home", "markhome", "findchest", "dump",
 }
-CONTROLLER_SHORTCUTS = {"roster", "worldblock", "mode", "version", "worksite", "addchest", "removechest", "chests", "gpshost"}
+CONTROLLER_SHORTCUTS = {
+    "roster", "worldblock", "mode", "version", "addzone", "removezone", "zones",
+    "addchest", "removechest", "chests", "gpshost",
+}
 # whoami is the one shortcut where <turtle> is optional -- see its
 # build_shortcut() branch and the unified dispatch below, which proxies
 # to a turtle whenever one was given rather than checking set membership.
@@ -660,9 +671,15 @@ def build_console_parser():
     verp.add_argument("n", nargs="?", type=int)
     verp.add_argument("--bump", action="store_true")
 
-    wsp = sub.add_parser("worksite", add_help=False)
+    azp = sub.add_parser("addzone", add_help=False)
     for name in ("minX", "minZ", "maxX", "maxZ", "y", "capacity"):
-        wsp.add_argument(name, nargs="?", type=int)
+        azp.add_argument(name, type=int)
+    azp.add_argument("height", nargs="?", type=int)
+
+    rzp = sub.add_parser("removezone", add_help=False)
+    rzp.add_argument("index", type=int)
+
+    sub.add_parser("zones", add_help=False)
 
     acp = sub.add_parser("addchest", add_help=False)
     acp.add_argument("x", type=int)
@@ -711,7 +728,12 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   whoami [turtle]                              basic info about the controller, or that turtle if named
   mode [idle|passive|aggressive]               get or set the autopilot mode (omit to just report it)
   version [N] [--bump]                         get or set the controller's manually-tracked code version
-  worksite [minX minZ maxX maxZ y capacity]    get (no args) or set the worksite's bounds/height/capacity
+  addzone <minX> <minZ> <maxX> <maxZ> <y> <capacity> [height]
+                                                add a mining zone -- height caps blocks descended per
+                                                pass (targets a Y-band instead of digging to bedrock);
+                                                the fleet balances evenly across every zone with room
+  removezone <index>                           remove a zone (see `zones` for its index)
+  zones                                         list every configured zone
   addchest <x> <y> <z> [maxX maxY maxZ]        add a chest location (or range) to unload/refuel at --
                                                 multiple may be added; the nearest to a turtle is used
   removechest <index>                          remove a configured chest (see `chests` for its index)
@@ -862,17 +884,29 @@ def main():
     verp.add_argument("n", nargs="?", type=int, help="Omit to just report the current version.")
     verp.add_argument("--bump", action="store_true", help="Increment the current version by 1.")
 
-    wsp = sub.add_parser("worksite", parents=[waitp],
-                          help="Get or set the current mining worksite's bounds/height/capacity. "
-                               "Chest locations are managed separately -- see addchest/removechest/chests.")
-    wsp.add_argument("controller")
-    wsp.add_argument("minX", nargs="?", type=int, help="Omit all 6 of minX..capacity to just view the current worksite.")
-    wsp.add_argument("minZ", nargs="?", type=int)
-    wsp.add_argument("maxX", nargs="?", type=int)
-    wsp.add_argument("maxZ", nargs="?", type=int)
-    wsp.add_argument("y", nargs="?", type=int, help="Height to start mining passes from.")
-    wsp.add_argument("capacity", nargs="?", type=int,
-                      help="How many non-overlapping cells to divide the site into (one per turtle).")
+    azp = sub.add_parser("addzone", parents=[waitp],
+                          help="Add a mining zone. The fleet balances turtles evenly across every zone "
+                               "with room, not fill-one-then-overflow. Chest locations are shared across "
+                               "all zones -- see addchest/removechest/chests.")
+    azp.add_argument("controller")
+    azp.add_argument("minX", type=int)
+    azp.add_argument("minZ", type=int)
+    azp.add_argument("maxX", type=int)
+    azp.add_argument("maxZ", type=int)
+    azp.add_argument("y", type=int, help="Height to start mining passes from.")
+    azp.add_argument("capacity", type=int,
+                      help="How many non-overlapping cells to divide the zone into (one per turtle).")
+    azp.add_argument("height", nargs="?", type=int,
+                      help="Caps how many blocks a pass descends before stopping on its own -- targets a "
+                           "specific Y-band (e.g. y=174, height=81 covers down to y=93) instead of digging "
+                           "to bedrock. Omit to dig to bedrock, as before.")
+
+    rzp = sub.add_parser("removezone", parents=[waitp], help="Remove a zone by its index (see `zones`).")
+    rzp.add_argument("controller")
+    rzp.add_argument("index", type=int)
+
+    zp = sub.add_parser("zones", parents=[waitp], help="List every configured mining zone.")
+    zp.add_argument("controller")
 
     acp = sub.add_parser("addchest", parents=[waitp],
                           help="Add a chest location (or range) a full turtle can unload/refuel at. "
