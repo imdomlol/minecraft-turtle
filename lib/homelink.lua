@@ -24,6 +24,8 @@
 
 if _G.__HOMELINK_MODULE then return _G.__HOMELINK_MODULE end
 
+local nav = dofile("/lib/nav.lua")
+
 local M = {}
 
 M.SLOT = 16
@@ -34,15 +36,26 @@ M.SLOT = 16
 -- and M.place() trusts that positionally, same as before.
 local ITEM_NAME = "enderstorage:ender_chest"
 
+local function isProtected(data)
+  return data ~= nil and (nav.isChest(data.name) or nav.isComputerCraftBlock(data.name))
+end
+
 -- Tries front, then up, then down, and places the chest in whichever
--- one is actually open. Deliberately doesn't dig to clear a blocked
--- direction -- unlike a mining job's own forward step (already vetted
--- as safe to dig by that job's own logic), blindly digging just to make
--- room for this would risk digging into something the caller never
--- intended to touch. A caller that hits "nowhere to place it" here can
--- simply try again later (a different position, a leg later), or fall
--- back to whatever else is available. Returns the direction it
--- succeeded in ("front", "up", or "down"), or nil, reason on failure.
+-- one is actually open -- or, if all three are already occupied, clears
+-- ONE of them first and retries. Confirmed live: a turtle mid-shaft,
+-- surrounded by solid rock on every side, is the COMMON case here, not
+-- a rare edge case -- refusing to dig at all (an earlier version of
+-- this function) made the whole feature useless in exactly the
+-- situation it exists for. Uses the same protected-block check dom-main/
+-- mining/vertical.lua's own leg-stepping already relies on (never a
+-- chest or ComputerCraft block -- a player's storage or another
+-- turtle/computer) -- ordinary stone/dirt/ore is exactly what a mining
+-- turtle already digs through as a matter of course, so clearing one
+-- more block here to make room for its own hardware isn't any riskier
+-- than the job it's already running. Only refuses (returns nil, reason)
+-- if every direction is either genuinely undiggable or specifically
+-- protected. Returns the direction it succeeded in ("front", "up", or
+-- "down").
 function M.place()
   if turtle.getItemCount(M.SLOT) == 0 then
     return nil, "no home-link chest in slot " .. M.SLOT
@@ -52,7 +65,24 @@ function M.place()
   if turtle.place() then return "front" end
   if turtle.placeUp() then return "up" end
   if turtle.placeDown() then return "down" end
-  return nil, "no open space to place the home-link chest (front/up/down all blocked)"
+
+  local found, data = turtle.inspect()
+  if found and not isProtected(data) and turtle.dig() then
+    turtle.select(M.SLOT)
+    if turtle.place() then return "front" end
+  end
+  found, data = turtle.inspectUp()
+  if found and not isProtected(data) and turtle.digUp() then
+    turtle.select(M.SLOT)
+    if turtle.placeUp() then return "up" end
+  end
+  found, data = turtle.inspectDown()
+  if found and not isProtected(data) and turtle.digDown() then
+    turtle.select(M.SLOT)
+    if turtle.placeDown() then return "down" end
+  end
+
+  return nil, "no open space to place the home-link chest (front/up/down all blocked, protected, or undiggable)"
 end
 
 -- Digs the chest back up from `direction` (as returned by M.place()) and
