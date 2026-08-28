@@ -603,7 +603,22 @@ function M.recover()
   end
 
   local picked, pickInfo = M.pickUp(saved.direction)
-  if not picked then return false, pickInfo end
+  if not picked then
+    -- Catch-all, not a duplicate of M.pickUp()'s own markPickup() calls
+    -- -- several of ITS failure branches (e.g. dig() itself failing)
+    -- never call markPickup() at all, confirmed live: status stayed
+    -- "placed" under its ORIGINAL timestamp through repeated failed
+    -- recovery attempts, which made dom-main/controller/scheduler.lua's
+    -- checks re-trigger recovery every single tick instead of ever
+    -- backing off. Only touches the record if it's still literally
+    -- "placed" -- a branch that already called markPickup() left it as
+    -- something else, so this is a no-op there.
+    local stillPlaced = loadState()
+    if stillPlaced and stillPlaced.status == "placed" then
+      markPickup("pickup_failed", pickInfo)
+    end
+    return false, pickInfo
+  end
   return true, pickInfo or "recovered placed home-link chest"
 end
 

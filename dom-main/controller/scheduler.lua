@@ -387,21 +387,38 @@ function M.recoverHomeLink(name, ageMs)
 end
 
 -- Reads (never moves) `name`'s own recorded home-link state. Returns
--- the age in ms since it was placed if status == "placed", or nil if
--- it's anything else (including unreachable this tick -- try again
--- next sweep, not worth logging).
+-- the ms since it was LAST TOUCHED if status == "placed" -- updatedAt
+-- (bumped by every markPickup() call, i.e. every recovery attempt,
+-- successful or not) if present, otherwise the original placement time
+-- -- or nil if status is anything else (including unreachable this
+-- tick -- try again next sweep, not worth logging). Using updatedAt
+-- rather than the original `at` matters even with lib/homelink.lua's
+-- own markPickup() coverage fixed: it's what actually backs off a
+-- turtle whose recovery keeps genuinely failing, instead of this
+-- reporting the same enormous "stuck for N seconds" age forever and
+-- HOMELINK_RETRY_COOLDOWN_MS below re-triggering it every single tick.
 local function homeLinkPlacedAge(name)
   local statusCmd = 'local f = fs.open("/state/homelink.state", "r"); '
     .. 'if not f then return "none" end; '
     .. 'local text = f.readAll(); f.close(); '
     .. 'local ok, decoded = pcall(textutils.unserializeJSON, text); '
     .. 'if not ok or type(decoded) ~= "table" or decoded.status ~= "placed" then return "none" end; '
-    .. 'return "placed:" .. tostring(os.epoch("utc") - (decoded.at or 0))'
+    .. 'return "placed:" .. tostring(os.epoch("utc") - math.max(decoded.at or 0, decoded.updatedAt or 0))'
   local ok, output = roster.proxy(name, statusCmd, HOMELINK_CHECK_TIMEOUT)
   if not ok then return nil end
   local ageStr = output and output:match("placed:(%d+)")
   return ageStr and tonumber(ageStr)
 end
+
+-- Floor on how often an IDLE turtle's dispatch pass (runs every tick,
+-- ~5s) will re-attempt recovery -- an idle turtle can never legitimately
+-- be mid-transfer (see M.checkHomeLink()'s comment), so in principle any
+-- "placed" record there is fair game immediately, but a genuinely,
+-- repeatedly failing recovery (the recorded chest is truly gone, say)
+-- would otherwise retry every single tick forever. Deliberately much
+-- shorter than HOMELINK_STALE_MS -- this is a floor against thrashing,
+-- not the same grace window that constant exists for.
+local HOMELINK_RETRY_COOLDOWN_MS = 15000
 
 -- Background sweep for a turtle that's STAYING busy (mining) with a
 -- home-link chest stuck "placed" the whole time -- see
@@ -649,7 +666,7 @@ function M.tick()
         -- couldn't.
         tasks[#tasks + 1] = function()
           local age = homeLinkPlacedAge(name)
-          if age then
+          if age and age >= HOMELINK_RETRY_COOLDOWN_MS then
             M.recoverHomeLink(name, age)
           elseif M.needsSelfRefuel(entry, name) then
             M.dispatchToChest(name, entry)
