@@ -125,6 +125,22 @@ local function buildCells(minX, maxX, minZ, maxZ, capacity)
   return cells
 end
 
+local function worksiteIdFor(cell, originX, originZ, length, width)
+  return table.concat({
+    tostring(cell.minX),
+    tostring(cell.maxX),
+    tostring(cell.minZ),
+    tostring(cell.maxZ),
+    tostring(cell.y),
+    tostring(cell.height or ""),
+    tostring(originX),
+    tostring(originZ),
+    tostring(length),
+    tostring(width),
+    tostring(COLUMN_STEP),
+  }, ":")
+end
+
 -- minX/minZ/maxX/maxZ: the zone's horizontal bounds (either corner
 -- order works). y: height to start mining passes from. capacity: how
 -- many cells to divide the zone into. height (optional): caps how many
@@ -370,6 +386,8 @@ function M.jobFor(cell)
     length = length,
     columnStep = COLUMN_STEP,
     width = width,
+    __worksiteId = worksiteIdFor(cell, originX, originZ, length, width),
+    __worksiteOrigin = { x = originX, y = cell.y, z = originZ },
   }
   if cell.height then params.height = cell.height end
   return {

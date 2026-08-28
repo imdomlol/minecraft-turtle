@@ -70,6 +70,7 @@ local DISPATCH_TIMEOUT        = 300 -- seconds -- generous: a fresh/idle turtle'
 local RESCUE_TIMEOUT          = 600
 local REFUEL_TIMEOUT          = 30
 local REFUEL_TRIP_TIMEOUT     = 120
+local GPS_FIX_TIMEOUT         = 15
 
 local MINE_DEFAULT_LENGTH              = 10
 local MINE_DEFAULT_OBSERVANT           = true
@@ -208,6 +209,23 @@ function M.hasKnownPosition(entry)
   return entry.position ~= nil and entry.position.gpsFixed == true
 end
 
+local function expectedWorksiteId(name)
+  local cell = worksite.assignCell(name)
+  if not cell then return nil end
+  return worksite.jobFor(cell).params.__worksiteId
+end
+
+function M.isCurrentWorksiteJob(name, params)
+  if type(params) ~= "table" then return false end
+  local expected = expectedWorksiteId(name)
+  return expected ~= nil and params.__worksiteId == expected
+end
+
+local function isStaleMiningJob(name, entry)
+  return entry and entry.job and entry.job.current == "mine_vertical"
+    and not M.isCurrentWorksiteJob(name, entry.job.params)
+end
+
 -- The best rescuer for `strandedName`: not itself stranded (it needs to
 -- be able to reach the chest under its own power to fetch fuel there --
 -- see M.attemptRescue()/lib/rescue.lua, which routes every rescue
@@ -279,18 +297,24 @@ function M.assignWork(name)
 
   local command = string.format(
     'local job = dofile("/lib/job.lua"); '
+      .. 'local expectedWorksiteId = %s; '
       .. 'local saved = job.loadCheckpoint(); '
       .. 'if saved and saved.name == "mine_vertical" and job.hasJob("mine_vertical") then '
       .. '  local params = saved.params or {}; '
-      .. '  params.__resume = saved.checkpoint; '
-      .. '  job.request("mine_vertical", params); '
-      .. '  return true, "resumed from checkpoint"; '
+      .. '  if params.__worksiteId == expectedWorksiteId then '
+      .. '    params.__resume = saved.checkpoint; '
+      .. '    job.request("mine_vertical", params); '
+      .. '    return true, "resumed from checkpoint"; '
+      .. '  end; '
+      .. '  job.clearCheckpoint(); '
       .. 'end; '
       .. 'local routing = dofile("/lib/routing.lua"); '
       .. 'local reached, info = routing.goto(%d, %d, %d, { tolerance = 0, allowDig = "safe" }); '
-      .. 'if reached then job.request("mine_vertical", %s) end; '
-      .. 'return reached, (info and info.reason)',
-    jobSpec.origin.x, jobSpec.origin.y, jobSpec.origin.z, luaLiteral(jobSpec.params)
+      .. 'if not reached then error(info and info.reason or "could not reach assigned cell") end; '
+      .. 'job.request("mine_vertical", %s); '
+      .. 'return true, "started mine_vertical"',
+    luaLiteral(jobSpec.params.__worksiteId), jobSpec.origin.x, jobSpec.origin.y, jobSpec.origin.z,
+    luaLiteral(jobSpec.params)
   )
 
   local ok, output = roster.proxy(name, command, DISPATCH_TIMEOUT)
@@ -299,6 +323,30 @@ function M.assignWork(name)
     return false, output
   end
   print("scheduler: " .. name .. " mining its cell (" .. tostring(output) .. ")")
+  return true, output
+end
+
+function M.cancelStaleWork(name, entry)
+  local currentId = entry and entry.job and entry.job.params and entry.job.params.__worksiteId
+  local expectedId = expectedWorksiteId(name)
+  print("scheduler: stopping stale mining job for " .. name
+    .. " (current=" .. tostring(currentId) .. ", expected=" .. tostring(expectedId) .. ")")
+  local command = 'local job = dofile("/lib/job.lua"); job.stop(); job.clearCheckpoint(); return true, job.status()'
+  local ok, output = roster.proxy(name, command, REFUEL_TIMEOUT)
+  if not ok then
+    print("scheduler: could not stop stale mining job for " .. name .. ": " .. tostring(output))
+    return false, output
+  end
+  return true, output
+end
+
+function M.refreshGPS(name)
+  local command = 'local nav = dofile("/lib/nav.lua"); local ok, result = nav.reacquireGPS(); if not ok then error(result) end; return nav.report()'
+  local ok, output = roster.proxy(name, command, GPS_FIX_TIMEOUT)
+  if not ok then
+    print("scheduler: gpsfix failed for " .. name .. ": " .. tostring(output))
+    return false, output
+  end
   return true, output
 end
 
@@ -440,6 +488,7 @@ end
 -- throttled well below TICK_INTERVAL's own cadence to avoid adding to
 -- the console's existing noise.
 local HEARTBEAT_EVERY_N_TICKS = 12 -- ~60s at the default 5s TICK_INTERVAL
+local GPS_FIX_EVERY_N_TICKS = 12 -- ~60s at the default 5s TICK_INTERVAL
 local tickCount = 0
 
 function M.tick()
@@ -470,7 +519,15 @@ function M.tick()
   local rescues = {} -- { {strandedName, entry, rescuerName}, ... }, resolved before any are dispatched
   for _, name in ipairs(names) do
     local entry = snapshot[name]
-    if entry and M.isStranded(entry) then
+    if isStaleMiningJob(name, entry) then
+      dispatched[name] = true
+      tasks[#tasks + 1] = function() M.cancelStaleWork(name, entry) end
+    end
+  end
+
+  for _, name in ipairs(names) do
+    local entry = snapshot[name]
+    if entry and not dispatched[name] and M.isStranded(entry) then
       dispatched[name] = true
       if not M.hasKnownPosition(entry) then
         print("scheduler: " .. name .. " is stranded but has no reliable position -- needs a manual `setpos` before it can be rescued")
@@ -496,9 +553,19 @@ function M.tick()
       if not M.hasKnownPosition(entry) then
         print("scheduler: " .. name .. " is idle but has no reliable position -- needs a manual `setpos` before autopilot will dispatch it")
       elseif M.needsSelfRefuel(entry, name) then
+        dispatched[name] = true
         tasks[#tasks + 1] = function() M.dispatchToChest(name, entry) end
       else
+        dispatched[name] = true
         tasks[#tasks + 1] = function() M.assignWork(name) end
+      end
+    end
+  end
+
+  if tickCount % GPS_FIX_EVERY_N_TICKS == 0 then
+    for _, name in ipairs(names) do
+      if not dispatched[name] then
+        tasks[#tasks + 1] = function() M.refreshGPS(name) end
       end
     end
   end

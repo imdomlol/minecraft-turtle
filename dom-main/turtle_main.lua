@@ -10,13 +10,13 @@
   hearing a "stop" command. Every known job needs registering here before
   job.run() starts, so the controller can request it later by name.
 
-  Also resumes a job left mid-run by an unplanned interruption (crash,
+  Also handles a job left mid-run by an unplanned interruption (crash,
   chunk unload, power loss) -- see lib/job.lua's M.checkpoint()/
   M.loadCheckpoint() and dom-main/mining/vertical.lua's own resume
-  handling. A checkpoint only ever survives to here when the previous run
-  never reached the point where job.lua clears it, so finding one means
-  exactly that: this boot follows something that didn't shut down
-  cleanly.
+  handling. Checkpoints are deliberately NOT auto-resumed here: only the
+  controller knows whether autopilot is enabled and whether the saved
+  work still belongs to the active worksite. A turtle booting by itself
+  should come up idle and wait for controller policy.
 ------------------------------------------------------------------------]]
 
 local fleet = dofile("/lib/fleet.lua")
@@ -34,9 +34,7 @@ end
 
 local saved = job.loadCheckpoint()
 if saved and job.hasJob(saved.name) then
-  print("job: resuming " .. saved.name .. " from a checkpoint (previous run didn't exit cleanly)")
-  saved.params.__resume = saved.checkpoint
-  job.request(saved.name, saved.params)
+  print("job: found " .. saved.name .. " checkpoint -- waiting for controller validation before resuming")
 elseif saved then
   print("job: found a checkpoint for unknown job \"" .. tostring(saved.name) .. "\" -- discarding it")
   job.clearCheckpoint()
