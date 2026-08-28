@@ -367,5 +367,155 @@ function M.face(facing)
   end
 end
 
+-- Whether to leave a block alone rather than dig through it while
+-- hunting for an opening to move through -- same conservative policy as
+-- lib/pathfind.lua's "safe" allowDig: never touch a liquid (nothing to
+-- break, and a turtle can already move straight through one) or a chest
+-- or other ComputerCraft block (another turtle, computer, modem,
+-- monitor, etc.) -- this is just trying to detect which way the turtle
+-- is facing, not a real trip, so it should never destroy anything an
+-- operator would mind losing.
+local function shouldSkipDig(found, data)
+  if not found then return false end
+  return M.isLiquid(data.name) or M.isChest(data.name) or M.isComputerCraftBlock(data.name)
+end
+
+-- "Movement obstructed" covers both blocks and entities in CC:Tweaked,
+-- same as lib/pathfind.lua's stepForward -- try both, whichever applies
+-- no-ops. Tries the plain move first so nothing gets dug for no reason
+-- when the way is already clear.
+local function tryForward()
+  if M.forward() then return true end
+  local found, data = turtle.inspect()
+  if not shouldSkipDig(found, data) then
+    turtle.dig()
+    turtle.attack()
+  end
+  return M.forward()
+end
+
+-- There's no turtle.inspectBack()/digBack() in the CC:Tweaked API -- the
+-- only way to see or clear whatever's directly behind the turtle is to
+-- turn around, treat it as "front" for a moment, then turn back. Two
+-- turnRights land back on the exact same heading either way, so this is
+-- safe to do purely to attempt a dig.
+local function tryBack()
+  if M.back() then return true end
+  M.turnRight(); M.turnRight()
+  local found, data = turtle.inspect()
+  if not shouldSkipDig(found, data) then
+    turtle.dig()
+    turtle.attack()
+  end
+  M.turnRight(); M.turnRight()
+  return M.back()
+end
+
+local function tryUp()
+  if M.up() then return true end
+  local found, data = turtle.inspectUp()
+  if not shouldSkipDig(found, data) then
+    turtle.digUp()
+    turtle.attackUp()
+  end
+  return M.up()
+end
+
+local function tryDown()
+  if M.down() then return true end
+  local found, data = turtle.inspectDown()
+  if not shouldSkipDig(found, data) then
+    turtle.digDown()
+    turtle.attackDown()
+  end
+  return M.down()
+end
+
+-- Determines this turtle's REAL facing, unlike M.reacquireGPS() (which
+-- only ever fixes position -- see that function's own comment for why
+-- GPS has no way to sense orientation at all). The only way to learn
+-- facing is to actually move and see which way the coordinates shifted:
+-- take a GPS fix, try to step one block (forward, then back, at each of
+-- up to 4 turns; if every horizontal direction here is blocked, try one
+-- level up, then one level down, before giving up), take a second GPS
+-- fix, and work out heading from the delta between them. Digs through
+-- whatever's in the way (see shouldSkipDig above) rather than giving up
+-- the moment the first direction is blocked -- a turtle that was just
+-- placed by an operator has no guarantee of open space in front of it.
+-- Always retraces its own steps afterward (even if the second GPS fix
+-- fails), so this never leaves the turtle anywhere but where it
+-- started. Returns true, { x, y, z, heading, facing } on success, or
+-- false, reason if there's no GPS fix at all, not enough fuel to risk a
+-- couple of test moves, or every direction it tried was blocked.
+function M.detectHeading()
+  init()
+  if not gps then return false, "no gps API available" end
+  if not fuel.hasFuel(4) then return false, "not enough fuel to safely detect heading" end
+  local x1, y1, z1 = gps.locate(GPS_TIMEOUT)
+  if not x1 then return false, "no GPS fix" end
+
+  -- Tries every heading at the CURRENT height (forward, then back, at
+  -- each of up to 4 turns), returning ("forward"|"back", turnsApplied)
+  -- the moment one works, or (nil, nil) after cycling all the way back
+  -- to the original facing having found nothing.
+  local function tryAllHeadingsHere()
+    for t = 0, 3 do
+      if tryForward() then return "forward", t end
+      if tryBack() then return "back", t end
+      if t < 3 then M.turnRight() end
+    end
+    M.turnRight() -- undo the 3 turns above -- back to the original facing
+    return nil, nil
+  end
+
+  local kind, turns = tryAllHeadingsHere()
+  local vertical = nil -- "up"/"down" if every horizontal direction was blocked
+
+  if not kind and tryUp() then
+    vertical = "up"
+    kind, turns = tryAllHeadingsHere()
+    if not kind then M.down() end -- straight back down the way we just came up
+  end
+
+  if not kind and not vertical and tryDown() then
+    vertical = "down"
+    kind, turns = tryAllHeadingsHere()
+    if not kind then M.up() end -- straight back up the way we just came down
+  end
+
+  if not kind then
+    return false, "surrounded on every side (and above/below) -- could not detect heading"
+  end
+
+  local x2, y2, z2 = gps.locate(GPS_TIMEOUT)
+
+  -- Retrace regardless of whether the second fix succeeded -- getting
+  -- back to the start position/facing matters more than the fix itself.
+  if kind == "forward" then M.back() else M.forward() end
+  if vertical == "up" then M.down() elseif vertical == "down" then M.up() end
+  for _ = 1, turns do M.turnLeft() end
+
+  if not x2 then return false, "lost GPS fix mid-detection" end
+
+  local dx, dz = x2 - x1, z2 - z1
+  local movedHeading
+  if dx == 1 and dz == 0 then movedHeading = 1
+  elseif dx == -1 and dz == 0 then movedHeading = 3
+  elseif dz == 1 and dx == 0 then movedHeading = 2
+  elseif dz == -1 and dx == 0 then movedHeading = 0
+  else
+    return false, "unexpected GPS shift (" .. dx .. ", " .. dz .. ") -- could not determine heading"
+  end
+  if kind == "back" then movedHeading = (movedHeading + 2) % 4 end
+
+  local heading = (movedHeading - turns) % 4
+  state.x, state.y, state.z = x1, y1, z1
+  state.heading = heading
+  state.source = "gps"
+  save()
+
+  return true, { x = x1, y = y1, z = z1, heading = heading, facing = HEADINGS[heading + 1] }
+end
+
 _G.__NAV_MODULE = M
 return M

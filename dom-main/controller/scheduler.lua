@@ -308,11 +308,8 @@ function M.assignWork(name)
       .. '  end; '
       .. '  job.clearCheckpoint(); '
       .. 'end; '
-      .. 'local routing = dofile("/lib/routing.lua"); '
-      .. 'local reached, info = routing.goto(%d, %d, %d, { tolerance = 0, allowDig = "safe" }); '
-      .. 'if not reached then error(info and info.reason or "could not reach assigned cell") end; '
-      .. 'job.request("mine_vertical", %s); '
-      .. 'return true, "started mine_vertical"',
+      .. 'job.request("goto_then_mine", { x = %d, y = %d, z = %d, tolerance = 0, allowDig = "safe", jobParams = %s }); '
+      .. 'return true, "queued goto_then_mine"',
     luaLiteral(jobSpec.params.__worksiteId), jobSpec.origin.x, jobSpec.origin.y, jobSpec.origin.z,
     luaLiteral(jobSpec.params)
   )

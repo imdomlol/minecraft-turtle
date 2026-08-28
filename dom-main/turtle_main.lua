@@ -22,8 +22,61 @@
 local fleet = dofile("/lib/fleet.lua")
 local job = dofile("/lib/job.lua")
 local homelink = dofile("/lib/homelink.lua")
+local nav = dofile("/lib/nav.lua")
+local vertical = dofile("/dom-main/mining/vertical.lua")
 
-job.register("mine_vertical", dofile("/dom-main/mining/vertical.lua").run)
+job.register("mine_vertical", vertical.run)
+
+job.register("goto_then_mine", function(params, shouldStop)
+  params = params or {}
+  local routing = dofile("/lib/routing.lua")
+  local reached, info = routing.goto(params.x, params.y, params.z, {
+    tolerance = params.tolerance or 0,
+    allowDig = params.allowDig,
+    shouldStop = shouldStop,
+  })
+  if not reached then
+    return false, "could not reach assigned cell: " .. tostring(info and info.reason)
+  end
+  if shouldStop() then
+    return true, "interrupted before mining"
+  end
+  job.request("mine_vertical", params.jobParams or {})
+  return true, "arrived; queued mine_vertical"
+end)
+
+-- lib/nav.lua's own init() only ever calls gps.locate() the very first
+-- time this turtle has no persisted /state/nav.state at all -- once any
+-- position exists (even a manual setpos), it trusts that on every later
+-- boot rather than re-checking GPS. That's normally fine, but a turtle
+-- that got physically broken and replaced elsewhere keeps its old
+-- position on disk with nothing to invalidate it, so it boots up
+-- confidently wrong until someone remembers to `gpsfix` it by hand.
+-- Reacquiring here means every boot self-corrects against the real GPS
+-- network whenever one's reachable; on failure (no anchors in range)
+-- M.reacquireGPS() leaves whatever position was already tracked
+-- untouched, so this is never worse than not calling it at all.
+local gpsOk, gpsResult = nav.reacquireGPS()
+if gpsOk then
+  print("nav: GPS fix on boot -- (" .. gpsResult.x .. ", " .. gpsResult.y .. ", " .. gpsResult.z .. ")")
+else
+  print("nav: no GPS fix on boot (" .. tostring(gpsResult) .. ") -- keeping last known position")
+end
+
+-- GPS only ever fixes position, never facing (see nav.lua's own
+-- comments on both functions for why) -- a turtle physically broken and
+-- replaced facing some new direction would otherwise boot up confident
+-- and wrong about which way it's pointed. Only worth attempting when
+-- the GPS fix above actually succeeded -- without a live GPS network
+-- there's nothing to measure a test move against anyway.
+if gpsOk then
+  local headingOk, headingResult = nav.detectHeading()
+  if headingOk then
+    print("nav: heading confirmed on boot -- facing " .. headingResult.facing)
+  else
+    print("nav: could not confirm heading on boot (" .. tostring(headingResult) .. ") -- keeping last known facing")
+  end
+end
 
 local recoveredHomeLink, homeLinkInfo = homelink.recover()
 if recoveredHomeLink then

@@ -45,6 +45,8 @@ if _G.__FLEET_MODULE then return _G.__FLEET_MODULE end
 
 local exec = dofile("/lib/exec.lua")
 
+local unpack = table.unpack or unpack
+
 local PROTOCOL           = "turtle-fleet-v1"
 local MODEM_SIDE         = "left"  -- ender modem is always equipped here, per hardware convention
 local DISCOVERY_BACKOFF  = 10      -- seconds between rednet.lookup() retries when no controller answers
@@ -126,15 +128,12 @@ end
 -- identity through `ident` -- a shared mutable box (see M.run()) rather
 -- than a plain upvalue, since heartbeatLoop/logLoop (separate closures,
 -- run in parallel) need to see the change immediately too.
-local function listenLoop(ident, controllerId)
+local function listenLoop(ident, controllerId, startExec)
   while true do
     local senderId, message = rednet.receive(PROTOCOL)
     if senderId == controllerId and type(message) == "table" then
       if message.type == "exec" then
-        local ok, output = exec.run(message.command)
-        rednet.send(controllerId, {
-          type = "result", cmd_id = message.cmd_id, ok = ok, output = output,
-        }, PROTOCOL)
+        startExec(message)
       elseif message.type == "pull_blocks" then
         -- A dedicated request/reply pair rather than routing through
         -- exec/"result" -- that path stringifies its return value for
@@ -158,6 +157,65 @@ local function listenLoop(ident, controllerId)
         sendHeartbeat(ident, controllerId)
       end
     end
+  end
+end
+
+local function runTasks(buildInitialTasks)
+  local tasks = {}
+
+  local function removeDead()
+    local kept = {}
+    for _, task in ipairs(tasks) do
+      if coroutine.status(task.co) ~= "dead" then kept[#kept + 1] = task end
+    end
+    tasks = kept
+  end
+
+  local function addTask(fn, onError)
+    local task = { co = coroutine.create(fn), filter = nil, onError = onError }
+    tasks[#tasks + 1] = task
+    local ok, filter = coroutine.resume(task.co)
+    if not ok then
+      if task.onError then task.onError(filter) else error(filter, 0) end
+    else
+      task.filter = filter
+    end
+    removeDead()
+  end
+
+  local function startExecTask(message)
+    addTask(function()
+      local ok, output = exec.run(message.command)
+      rednet.send(controllerId, {
+        type = "result", cmd_id = message.cmd_id, ok = ok, output = output,
+      }, PROTOCOL)
+    end, function(err)
+      rednet.send(controllerId, {
+        type = "result",
+        cmd_id = message.cmd_id,
+        ok = false,
+        output = "error: " .. tostring(err),
+      }, PROTOCOL)
+    end)
+  end
+
+  for _, fn in ipairs(buildInitialTasks(startExecTask)) do addTask(fn) end
+
+  while #tasks > 0 do
+    local event = { os.pullEvent() }
+    local taskCount = #tasks
+    for i = 1, taskCount do
+      local task = tasks[i]
+      if task and (task.filter == nil or task.filter == event[1]) then
+        local ok, filter = coroutine.resume(task.co, unpack(event))
+        if not ok then
+          if task.onError then task.onError(filter) else error(filter, 0) end
+        else
+          task.filter = filter
+        end
+      end
+    end
+    removeDead()
   end
 end
 
@@ -248,11 +306,13 @@ function M.run()
 
   term.redirect(exec.wrapTerm(term.current()))
 
-  parallel.waitForAny(
-    function() listenLoop(ident, controllerId) end,
-    function() heartbeatLoop(ident, controllerId) end,
-    function() logLoop(ident, controllerId) end
-  )
+  runTasks(function(startExecTask)
+    return {
+      function() listenLoop(ident, controllerId, startExecTask) end,
+      function() heartbeatLoop(ident, controllerId) end,
+      function() logLoop(ident, controllerId) end,
+    }
+  end)
 end
 
 _G.__FLEET_MODULE = M
