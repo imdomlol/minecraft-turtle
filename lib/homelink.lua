@@ -557,7 +557,22 @@ end
 
 function M.recover()
   local inventoryOk, inventoryInfo = M.normalizeInventory()
-  if inventoryOk then return true, inventoryInfo end
+  if inventoryOk then
+    -- Clears a stale "placed" record left behind by whatever put the
+    -- chest back in inventory without going through M.pickUp() itself
+    -- (a boot-time recovery on a PREVIOUS boot, an operator's manual
+    -- fix, another call to M.recover()) -- otherwise it sits there with
+    -- its original timestamp forever, and dom-main/controller/
+    -- scheduler.lua's M.checkHomeLink() sweep (which keys off
+    -- status == "placed") keeps re-alerting on a chest that's actually
+    -- already safe. Confirmed live: exactly this kept a turtle's chest
+    -- reported "stuck" indefinitely after it had genuinely recovered.
+    local saved = loadState()
+    if saved and saved.status == "placed" then
+      markPickup("picked_up", "already in inventory")
+    end
+    return true, inventoryInfo
+  end
 
   local saved = loadState()
   if not saved or saved.status ~= "placed" or not saved.turtle or not saved.direction then
@@ -567,13 +582,24 @@ function M.recover()
   local target = saved.turtle
   local reached, reachInfo = routing.goto(target.x, target.y, target.z, { tolerance = 0, allowDig = "safe" })
   if not reached then
-    return false, "could not reach recorded home-link chest position: " .. tostring(reachInfo and reachInfo.reason)
+    -- markPickup() here too (unlike before) -- otherwise this stays
+    -- "placed" forever with its original timestamp even though the
+    -- attempt is over, and M.checkHomeLink() just keeps re-triggering
+    -- the exact same doomed attempt every sweep. Recorded as
+    -- "pickup_failed" (same status M.pickUp()'s own failure branches
+    -- use), not silently dropped -- still visible via M.getState() for
+    -- an operator to actually go check on.
+    local reason = "could not reach recorded home-link chest position: " .. tostring(reachInfo and reachInfo.reason)
+    markPickup("pickup_failed", reason)
+    return false, reason
   end
   nav.face(target.heading or target.facing)
 
   local found, data = inspectDirection(saved.direction)
   if not (found and nav.isChest(data.name)) then
-    return false, "recorded home-link chest is no longer present at the saved position"
+    local reason = "recorded home-link chest is no longer present at the saved position"
+    markPickup("pickup_failed", reason)
+    return false, reason
   end
 
   local picked, pickInfo = M.pickUp(saved.direction)

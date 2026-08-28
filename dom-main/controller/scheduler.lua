@@ -369,15 +369,28 @@ end
 -- autopilot notices and fixes it long before that.
 local HOMELINK_STALE_MS = 60000
 
--- Reads (never moves) `name`'s own recorded home-link state and, if
--- it's been stuck "placed" longer than HOMELINK_STALE_MS, sends it the
--- "recover_home_link" job (dom-main/turtle_main.lua) -- a plain
--- job.request(), the same cooperative interrupt mechanism goto/stop
--- already use, so this never races a job that's actively moving the
--- turtle via some OTHER concurrently-running exec command. Once
--- recovery finishes the turtle lands idle and the very next tick's
--- ordinary M.assignWork() picks it back up like any other idle turtle.
-function M.checkHomeLink(name)
+-- Sends `name` the "recover_home_link" job (dom-main/turtle_main.lua)
+-- -- a plain job.request(), the same cooperative interrupt mechanism
+-- goto/stop already use, so this never races a job that's actively
+-- moving the turtle via some OTHER concurrently-running exec command.
+function M.recoverHomeLink(name, ageMs)
+  if ageMs then
+    print("scheduler: " .. name .. "'s home-link chest has been stuck \"placed\" for "
+      .. math.floor(ageMs / 1000) .. "s -- sending it back to reclaim it")
+  else
+    print("scheduler: " .. name .. " went idle with an un-recovered home-link chest -- sending it back to reclaim it")
+  end
+  local recovered, info = roster.proxy(name, 'return dofile("/lib/job.lua").request("recover_home_link", {})', HOMELINK_RECOVER_TIMEOUT)
+  if not recovered then
+    print("scheduler: could not send " .. name .. " to recover its home-link chest: " .. tostring(info))
+  end
+end
+
+-- Reads (never moves) `name`'s own recorded home-link state. Returns
+-- the age in ms since it was placed if status == "placed", or nil if
+-- it's anything else (including unreachable this tick -- try again
+-- next sweep, not worth logging).
+local function homeLinkPlacedAge(name)
   local statusCmd = 'local f = fs.open("/state/homelink.state", "r"); '
     .. 'if not f then return "none" end; '
     .. 'local text = f.readAll(); f.close(); '
@@ -385,18 +398,28 @@ function M.checkHomeLink(name)
     .. 'if not ok or type(decoded) ~= "table" or decoded.status ~= "placed" then return "none" end; '
     .. 'return "placed:" .. tostring(os.epoch("utc") - (decoded.at or 0))'
   local ok, output = roster.proxy(name, statusCmd, HOMELINK_CHECK_TIMEOUT)
-  if not ok then return end -- unreachable this tick -- try again next sweep, not worth logging
-
+  if not ok then return nil end
   local ageStr = output and output:match("placed:(%d+)")
-  local age = ageStr and tonumber(ageStr)
-  if not age or age <= HOMELINK_STALE_MS then return end
+  return ageStr and tonumber(ageStr)
+end
 
-  print("scheduler: " .. name .. "'s home-link chest has been stuck \"placed\" for "
-    .. math.floor(age / 1000) .. "s -- sending it back to reclaim it")
-  local recovered, info = roster.proxy(name, 'return dofile("/lib/job.lua").request("recover_home_link", {})', HOMELINK_RECOVER_TIMEOUT)
-  if not recovered then
-    print("scheduler: could not send " .. name .. " to recover its home-link chest: " .. tostring(info))
-  end
+-- Background sweep for a turtle that's STAYING busy (mining) with a
+-- home-link chest stuck "placed" the whole time -- see
+-- M.tick()'s own idle-dispatch pass for the OTHER half of this: the
+-- moment covered here alone used to lose a race against ordinary work
+-- dispatch (confirmed live -- a turtle that finished/failed
+-- recover_home_link and landed idle got sent straight back to mining
+-- by that same tick's idle pass, before this sweep (which only runs
+-- every HOMELINK_CHECK_EVERY_N_TICKS) ever got a chance to notice
+-- again). HOMELINK_STALE_MS's grace window exists because a MINING
+-- turtle can legitimately be mid-transfer for a few seconds; an idle
+-- one never can (tryHomeLink() only ever runs while mine_vertical is
+-- the current job), which is why the idle-dispatch check needs no such
+-- grace window at all.
+function M.checkHomeLink(name)
+  local age = homeLinkPlacedAge(name)
+  if not age or age <= HOMELINK_STALE_MS then return end
+  M.recoverHomeLink(name, age)
 end
 
 -- Sends `rescuerName` (already chosen -- see M.tick()/M.pickRescuer())
@@ -612,12 +635,28 @@ function M.tick()
     if entry and not dispatched[name] and M.isIdle(entry) then
       if not M.hasKnownPosition(entry) then
         print("scheduler: " .. name .. " is idle but has no reliable position -- needs a manual `setpos` before autopilot will dispatch it")
-      elseif M.needsSelfRefuel(entry, name) then
-        dispatched[name] = true
-        tasks[#tasks + 1] = function() M.dispatchToChest(name, entry) end
       else
         dispatched[name] = true
-        tasks[#tasks + 1] = function() M.assignWork(name) end
+        -- The home-link check here is a real network round trip
+        -- (roster.proxy), so it belongs inside this deferred task (runs
+        -- concurrently with every other turtle's, via
+        -- parallel.waitForAll below) rather than in the decision loop
+        -- itself, which -- unlike this -- only ever does cheap local
+        -- reads off the snapshot. Checked BEFORE ordinary work dispatch,
+        -- every tick, not just on HOMELINK_CHECK_EVERY_N_TICKS's slower
+        -- cadence -- see M.checkHomeLink()'s own comment for why this
+        -- exact spot is what actually closes the race that sweep alone
+        -- couldn't.
+        tasks[#tasks + 1] = function()
+          local age = homeLinkPlacedAge(name)
+          if age then
+            M.recoverHomeLink(name, age)
+          elseif M.needsSelfRefuel(entry, name) then
+            M.dispatchToChest(name, entry)
+          else
+            M.assignWork(name)
+          end
+        end
       end
     end
   end
