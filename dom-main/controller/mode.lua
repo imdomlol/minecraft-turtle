@@ -42,26 +42,33 @@ local VALID_MODES = { idle = true, passive = true, aggressive = true }
 local M = {}
 
 local mode -- lazily loaded, see loadState() below
+local ignored -- turtle name -> true; turtles the autopilot must not command
 local connected = false
 local lastConnect = nil -- os.epoch("utc") of the most recent connect() call
 
 local function save()
   if not fs.exists("/state") then fs.makeDir("/state") end
   local f = fs.open(STATE_PATH, "w")
-  f.write(textutils.serializeJSON({ mode = mode }))
+  f.write(textutils.serializeJSON({ mode = mode, ignored = ignored }))
   f.close()
 end
 
 local function loadState()
   if mode then return end
   mode = "idle"
+  ignored = {}
   if not fs.exists(STATE_PATH) then return end
   local f = fs.open(STATE_PATH, "r")
   local text = f.readAll()
   f.close()
   local ok, decoded = pcall(textutils.unserializeJSON, text)
-  if ok and type(decoded) == "table" and VALID_MODES[decoded.mode] then
-    mode = decoded.mode
+  if ok and type(decoded) == "table" then
+    if VALID_MODES[decoded.mode] then mode = decoded.mode end
+    if type(decoded.ignored) == "table" then
+      for name, value in pairs(decoded.ignored) do
+        if value and type(name) == "string" then ignored[name] = true end
+      end
+    end
   end
 end
 
@@ -87,6 +94,37 @@ end
 
 function M.disconnect()
   connected = false
+end
+
+function M.ignore(name)
+  loadState()
+  name = tostring(name or "")
+  if name == "" then error("ignore needs a turtle name", 2) end
+  ignored[name] = true
+  save()
+  return M.listIgnored()
+end
+
+function M.unignore(name)
+  loadState()
+  name = tostring(name or "")
+  if name == "" then error("unignore needs a turtle name", 2) end
+  ignored[name] = nil
+  save()
+  return M.listIgnored()
+end
+
+function M.isIgnored(name)
+  loadState()
+  return ignored[tostring(name or "")] == true
+end
+
+function M.listIgnored()
+  loadState()
+  local names = {}
+  for name in pairs(ignored) do names[#names + 1] = name end
+  table.sort(names)
+  return names
 end
 
 local function isConnected()

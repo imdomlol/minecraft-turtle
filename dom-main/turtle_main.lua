@@ -45,6 +45,18 @@ job.register("goto_then_mine", function(params, shouldStop)
   return true, "arrived; queued mine_vertical"
 end)
 
+-- Requested by dom-main/controller/scheduler.lua's M.checkHomeLink()
+-- when this turtle's own /state/homelink.state has been stuck "placed"
+-- too long -- same cooperative job.request() interrupt goto/stop
+-- already use, so this can never race whatever job (mining, most
+-- likely) happens to be running when it arrives. Just runs
+-- lib/homelink.lua's own M.recover(), then goes idle -- the very next
+-- tick's ordinary M.assignWork() picks the turtle back up like any
+-- other idle one.
+job.register("recover_home_link", function(params, shouldStop)
+  return homelink.recover()
+end)
+
 -- lib/nav.lua's own init() only ever calls gps.locate() the very first
 -- time this turtle has no persisted /state/nav.state at all -- once any
 -- position exists (even a manual setpos), it trusts that on every later

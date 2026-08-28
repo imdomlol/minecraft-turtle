@@ -71,6 +71,8 @@ local RESCUE_TIMEOUT          = 600
 local REFUEL_TIMEOUT          = 30
 local REFUEL_TRIP_TIMEOUT     = 120
 local GPS_FIX_TIMEOUT         = 15
+local HOMELINK_CHECK_TIMEOUT  = 15
+local HOMELINK_RECOVER_TIMEOUT = 120 -- generous: recovery may involve a real trip back to the chest
 
 local MINE_DEFAULT_LENGTH              = 10
 local MINE_DEFAULT_OBSERVANT           = true
@@ -221,7 +223,12 @@ function M.isCurrentWorksiteJob(name, params)
   return expected ~= nil and params.__worksiteId == expected
 end
 
+local function isIgnored(name)
+  return mode.isIgnored and mode.isIgnored(name)
+end
+
 local function isStaleMiningJob(name, entry)
+  if isIgnored(name) then return false end
   return entry and entry.job and entry.job.current == "mine_vertical"
     and not M.isCurrentWorksiteJob(name, entry.job.params)
 end
@@ -254,7 +261,7 @@ function M.pickRescuer(snapshot, strandedName, exclude)
   local best, bestCost = nil, nil
   for name, entry in pairs(snapshot) do
     if name ~= strandedName and not (exclude and exclude[name])
-        and not M.isStranded(entry) and M.hasKnownPosition(entry) then
+        and not isIgnored(name) and not M.isStranded(entry) and M.hasKnownPosition(entry) then
       local cost = fuel.travelCost(entry.position, chest)
       if not best or cost < bestCost then
         best, bestCost = name, cost
@@ -345,6 +352,51 @@ function M.refreshGPS(name)
     return false, output
   end
   return true, output
+end
+
+-- How long a home-link chest may plausibly sit in "placed" state before
+-- it's treated as stuck rather than mid-transfer: dom-main/mining/
+-- vertical.lua's tryHomeLink() runs place -> refuel -> drop -> pickUp
+-- as one uninterrupted synchronous call with no cooperative-stop check
+-- anywhere in between, so under normal operation this never takes more
+-- than a few seconds. Anything still "placed" this much later means
+-- whatever ran that trip got cut off outright (crash, reboot, chunk
+-- unload) before ever reaching pickUp() -- lib/homelink.lua's own
+-- M.place() now self-heals this on a turtle's own next unload attempt
+-- (see that commit), but a turtle whose inventory doesn't fill up again
+-- for a while would otherwise leave its chest sitting exposed in the
+-- world for just as long, unnoticed by anyone. This sweep exists so the
+-- autopilot notices and fixes it long before that.
+local HOMELINK_STALE_MS = 60000
+
+-- Reads (never moves) `name`'s own recorded home-link state and, if
+-- it's been stuck "placed" longer than HOMELINK_STALE_MS, sends it the
+-- "recover_home_link" job (dom-main/turtle_main.lua) -- a plain
+-- job.request(), the same cooperative interrupt mechanism goto/stop
+-- already use, so this never races a job that's actively moving the
+-- turtle via some OTHER concurrently-running exec command. Once
+-- recovery finishes the turtle lands idle and the very next tick's
+-- ordinary M.assignWork() picks it back up like any other idle turtle.
+function M.checkHomeLink(name)
+  local statusCmd = 'local f = fs.open("/state/homelink.state", "r"); '
+    .. 'if not f then return "none" end; '
+    .. 'local text = f.readAll(); f.close(); '
+    .. 'local ok, decoded = pcall(textutils.unserializeJSON, text); '
+    .. 'if not ok or type(decoded) ~= "table" or decoded.status ~= "placed" then return "none" end; '
+    .. 'return "placed:" .. tostring(os.epoch("utc") - (decoded.at or 0))'
+  local ok, output = roster.proxy(name, statusCmd, HOMELINK_CHECK_TIMEOUT)
+  if not ok then return end -- unreachable this tick -- try again next sweep, not worth logging
+
+  local ageStr = output and output:match("placed:(%d+)")
+  local age = ageStr and tonumber(ageStr)
+  if not age or age <= HOMELINK_STALE_MS then return end
+
+  print("scheduler: " .. name .. "'s home-link chest has been stuck \"placed\" for "
+    .. math.floor(age / 1000) .. "s -- sending it back to reclaim it")
+  local recovered, info = roster.proxy(name, 'return dofile("/lib/job.lua").request("recover_home_link", {})', HOMELINK_RECOVER_TIMEOUT)
+  if not recovered then
+    print("scheduler: could not send " .. name .. " to recover its home-link chest: " .. tostring(info))
+  end
 end
 
 -- Sends `rescuerName` (already chosen -- see M.tick()/M.pickRescuer())
@@ -486,6 +538,11 @@ end
 -- the console's existing noise.
 local HEARTBEAT_EVERY_N_TICKS = 12 -- ~60s at the default 5s TICK_INTERVAL
 local GPS_FIX_EVERY_N_TICKS = 12 -- ~60s at the default 5s TICK_INTERVAL
+-- Deliberately tighter than GPS_FIX_EVERY_N_TICKS -- HOMELINK_STALE_MS
+-- above is already a 60s grace window on top of this, so checking any
+-- less often than that would just add pure detection lag on top of a
+-- threshold that's already generous.
+local HOMELINK_CHECK_EVERY_N_TICKS = 6 -- ~30s at the default 5s TICK_INTERVAL
 local tickCount = 0
 
 function M.tick()
@@ -502,9 +559,11 @@ function M.tick()
   for name in pairs(snapshot) do names[#names + 1] = name end
 
   local strandedCount, idleCount = 0, 0
-  for _, entry in pairs(snapshot) do
-    if M.isStranded(entry) then strandedCount = strandedCount + 1
-    elseif M.isIdle(entry) then idleCount = idleCount + 1 end
+  for name, entry in pairs(snapshot) do
+    if not isIgnored(name) then
+      if M.isStranded(entry) then strandedCount = strandedCount + 1
+      elseif M.isIdle(entry) then idleCount = idleCount + 1 end
+    end
   end
   if tickCount % HEARTBEAT_EVERY_N_TICKS == 0 then
     print("scheduler: tick " .. tickCount .. " -- " .. #names .. " known, "
@@ -515,8 +574,12 @@ function M.tick()
   local tasks = {}
   local rescues = {} -- { {strandedName, entry, rescuerName}, ... }, resolved before any are dispatched
   for _, name in ipairs(names) do
+    if isIgnored(name) then dispatched[name] = true end
+  end
+
+  for _, name in ipairs(names) do
     local entry = snapshot[name]
-    if isStaleMiningJob(name, entry) then
+    if not dispatched[name] and isStaleMiningJob(name, entry) then
       dispatched[name] = true
       tasks[#tasks + 1] = function() M.cancelStaleWork(name, entry) end
     end
@@ -563,6 +626,14 @@ function M.tick()
     for _, name in ipairs(names) do
       if not dispatched[name] then
         tasks[#tasks + 1] = function() M.refreshGPS(name) end
+      end
+    end
+  end
+
+  if tickCount % HOMELINK_CHECK_EVERY_N_TICKS == 0 then
+    for _, name in ipairs(names) do
+      if not dispatched[name] and not isIgnored(name) then
+        tasks[#tasks + 1] = function() M.checkHomeLink(name) end
       end
     end
   end

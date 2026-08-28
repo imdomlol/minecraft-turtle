@@ -34,6 +34,9 @@ Usage:
   turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
   turtlectl.py mode <controller> [idle|passive|aggressive]  -- get or set the autopilot mode
+  turtlectl.py ignore <controller> <turtle>  -- stop autopilot from sending that turtle commands
+  turtlectl.py unignore <controller> <turtle>  -- allow autopilot commands again
+  turtlectl.py ignored <controller>  -- list turtles ignored by autopilot
   turtlectl.py version <controller> [N] [--bump]  -- get or set the controller's code version
   turtlectl.py addzone <controller> <minX> <minZ> <maxX> <maxZ> <y> <capacity> [height] [--name NAME]
                          -- add a mining zone -- height caps blocks descended per pass
@@ -496,6 +499,17 @@ def build_shortcut(cmd, ns):
             return f"set mode to {ns.value}", command
         return "current mode", 'return dofile("/dom-main/controller/mode.lua").get()'
 
+    if cmd == "ignore":
+        command = f'return dofile("/dom-main/controller/mode.lua").ignore({lua_string(ns.turtle)})'
+        return f"ignore turtle {ns.turtle}", command
+
+    if cmd == "unignore":
+        command = f'return dofile("/dom-main/controller/mode.lua").unignore({lua_string(ns.turtle)})'
+        return f"stop ignoring turtle {ns.turtle}", command
+
+    if cmd == "ignored":
+        return "ignored turtles", 'return dofile("/dom-main/controller/mode.lua").listIgnored()'
+
     if cmd == "version":
         if getattr(ns, "bump", False):
             return "bump version", 'return dofile("/dom-main/controller/version.lua").bump()'
@@ -563,7 +577,7 @@ TURTLE_SHORTCUTS = {
 }
 CONTROLLER_SHORTCUTS = {
     "roster", "worldblock", "mode", "version", "addzone", "removezone", "zones",
-    "addchest", "removechest", "chests", "gpshost",
+    "ignore", "unignore", "ignored", "addchest", "removechest", "chests", "gpshost",
 }
 # whoami is the one shortcut where <turtle> is optional -- see its
 # build_shortcut() branch and the unified dispatch below, which proxies
@@ -681,6 +695,14 @@ def build_console_parser():
 
     modp = sub.add_parser("mode", add_help=False)
     modp.add_argument("value", nargs="?", choices=["idle", "passive", "aggressive"])
+
+    igp = sub.add_parser("ignore", add_help=False)
+    igp.add_argument("turtle")
+
+    uigp = sub.add_parser("unignore", add_help=False)
+    uigp.add_argument("turtle")
+
+    sub.add_parser("ignored", add_help=False)
 
     verp = sub.add_parser("version", add_help=False)
     verp.add_argument("n", nargs="?", type=int)
@@ -898,6 +920,20 @@ def main():
     modp.add_argument("controller")
     modp.add_argument("value", nargs="?", choices=["idle", "passive", "aggressive"],
                        help="Omit to just report the current mode.")
+
+    igp = sub.add_parser("ignore", parents=[waitp],
+                          help="Tell the controller autopilot not to command a specific turtle.")
+    igp.add_argument("controller")
+    igp.add_argument("turtle")
+
+    uigp = sub.add_parser("unignore", parents=[waitp],
+                           help="Allow the controller autopilot to command a turtle again.")
+    uigp.add_argument("controller")
+    uigp.add_argument("turtle")
+
+    ignp = sub.add_parser("ignored", parents=[waitp],
+                           help="List turtles currently ignored by the controller autopilot.")
+    ignp.add_argument("controller")
 
     verp = sub.add_parser("version", parents=[waitp],
                            help="Get or set the controller's manually-tracked code version.")
