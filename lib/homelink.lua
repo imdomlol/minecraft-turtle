@@ -318,24 +318,25 @@ function M.place()
     M.blackbox("place.normalize_inventory", { ok = normalized == true })
     M.blackboxSlot("place.slot16_after_normalize", M.SLOT)
     if not normalized then
-      -- Not necessarily lost -- it may just be sitting exactly where an
-      -- earlier M.place() left it, if whatever ran that trip got cut
-      -- off (crash, reboot, chunk unload, an operator's stop landing in
-      -- the narrow window between M.place() and M.pickUp()) before ever
-      -- reaching the pickup half. M.recover() already knows how to walk
-      -- back to a recorded "placed" position and reclaim it from there
-      -- -- it's what dom-main/turtle_main.lua already runs once at boot
-      -- for exactly this reason. Trying it here too means a turtle
-      -- self-heals on its very next unload attempt instead of silently
-      -- falling back to the chestfinder indefinitely until it next
-      -- happens to reboot. A no-op (returns false fast) when there's no
-      -- "placed" record to chase, so this costs nothing in the common
-      -- case where the chest is genuinely just missing.
-      local recovered, recoverErr = M.recover()
-      M.blackbox("place.recover_stray_chest", { ok = recovered == true, info = recoverErr })
-      if not recovered then
-        return nil, "no home-link chest in slot " .. M.SLOT
-      end
+      -- Deliberately NOT trying M.recover() here (a previous version of
+      -- this function did) -- confirmed live, it can hang the entire
+      -- job: M.recover()'s routing.goto() back to a recorded "placed"
+      -- position takes no shouldStop at all, and M.place() is called
+      -- from dom-main/mining/vertical.lua's tryHomeLink() every single
+      -- time a turtle's inventory fills up during ordinary mining, with
+      -- no cooperative-stop check anywhere in that whole call chain --
+      -- so a turtle stuck mid-recovery here can't honor ANY interrupt,
+      -- including an operator's plain stop, until that trip finishes on
+      -- its own. A stray "placed" chest is exactly what dom-main/
+      -- controller/scheduler.lua's M.checkHomeLink() sweep already
+      -- exists to fix instead: it runs recovery as its own top-level
+      -- "recover_home_link" job (dom-main/turtle_main.lua), the same
+      -- cooperative job.request() switch goto/stop already use, which
+      -- CAN be interrupted like any other job -- and dom-main/
+      -- turtle_main.lua's own boot-time M.recover() call covers the
+      -- reboot case. This function just fails fast instead, same as
+      -- always.
+      return nil, "no home-link chest in slot " .. M.SLOT
     end
   end
   local gpsOk, gpsInfo = nav.reacquireGPS()
