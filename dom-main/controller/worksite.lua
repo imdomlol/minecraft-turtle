@@ -159,9 +159,27 @@ end
 -- capacities put *every* cell outside). Checking every cell rather than
 -- just the nominal cellW/cellD, since the last row/column can come out
 -- smaller than the rest (see buildCells()'s own maxX/maxZ clamp).
-function M.addZone(minX, minZ, maxX, maxZ, y, capacity, height)
+--
+-- `name` (optional) is a purely cosmetic, operator-facing label -- shown
+-- back by M.listZones() and, if given, usable in place of a numeric
+-- index anywhere a zone index is otherwise accepted (M.removeZone()) --
+-- so an operator juggling several Y-banded zones over the same x/z
+-- footprint (e.g. "diamonds" vs "ancient-debris") doesn't have to keep
+-- re-deriving which numbered index is which. Refused (nil, reason) if
+-- it collides with an existing zone's name -- silently allowing two
+-- zones to share a name would make that same lookup ambiguous.
+function M.addZone(minX, minZ, maxX, maxZ, y, capacity, height, name)
   local loX, hiX = math.min(minX, maxX), math.max(minX, maxX)
   local loZ, hiZ = math.min(minZ, maxZ), math.max(minZ, maxZ)
+
+  loadState()
+  if name then
+    for _, existing in ipairs(state.zones) do
+      if existing.name == name then
+        return nil, "a zone named \"" .. name .. "\" already exists"
+      end
+    end
+  end
 
   local cells = buildCells(loX, hiX, loZ, hiZ, capacity)
   for _, cell in ipairs(cells) do
@@ -180,10 +198,10 @@ function M.addZone(minX, minZ, maxX, maxZ, y, capacity, height)
     cell.height = height
   end
 
-  loadState()
   local zone = {
     minX = loX, maxX = hiX, minZ = loZ, maxZ = hiZ, y = y, height = height,
     capacity = capacity,
+    name = name,
     cells = cells,
     assignments = {}, -- turtle name -> cell index (0-based)
   }
@@ -192,16 +210,34 @@ function M.addZone(minX, minZ, maxX, maxZ, y, capacity, height)
   return zone
 end
 
--- Removes the zone at `index` (1-based, matching M.listZones()'s own
--- ordering). Refuses (returns false, reason) while any turtle is still
--- assigned there -- release them first (M.releaseCell()) rather than
--- silently orphaning a turtle's sticky cell out from under it.
-function M.removeZone(index)
+-- Resolves `indexOrName` (a 1-based numeric index, OR a zone's `name`)
+-- to its position in state.zones, or nil if neither matches anything.
+-- A bare numeric string ("2") is treated as an index, not a name -- a
+-- zone can't usefully be named a plain number anyway, since it'd be
+-- indistinguishable from one here.
+local function resolveZoneIndex(indexOrName)
   loadState()
-  local zone = state.zones[index]
-  if not zone then return false, "no zone at index " .. tostring(index) end
+  local asNumber = tonumber(indexOrName)
+  if asNumber then return asNumber end
+  for i, zone in ipairs(state.zones) do
+    if zone.name == indexOrName then return i end
+  end
+  return nil
+end
+
+-- Removes the zone at `indexOrName` -- a 1-based index (matching
+-- M.listZones()'s own ordering) or a zone's `name`, see
+-- resolveZoneIndex() above. Refuses (returns false, reason) while any
+-- turtle is still assigned there -- release them first
+-- (M.releaseCell()) rather than silently orphaning a turtle's sticky
+-- cell out from under it.
+function M.removeZone(indexOrName)
+  loadState()
+  local index = resolveZoneIndex(indexOrName)
+  local zone = index and state.zones[index]
+  if not zone then return false, "no zone matching " .. tostring(indexOrName) end
   if next(zone.assignments) ~= nil then
-    return false, "zone " .. index .. " still has turtles assigned -- release them first"
+    return false, "zone " .. tostring(indexOrName) .. " still has turtles assigned -- release them first"
   end
   table.remove(state.zones, index)
   save()

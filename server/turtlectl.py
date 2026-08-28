@@ -35,10 +35,11 @@ Usage:
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
   turtlectl.py mode <controller> [idle|passive|aggressive]  -- get or set the autopilot mode
   turtlectl.py version <controller> [N] [--bump]  -- get or set the controller's code version
-  turtlectl.py addzone <controller> <minX> <minZ> <maxX> <maxZ> <y> <capacity> [height]
+  turtlectl.py addzone <controller> <minX> <minZ> <maxX> <maxZ> <y> <capacity> [height] [--name NAME]
                          -- add a mining zone -- height caps blocks descended per pass
-                         (targets a specific Y-band instead of digging to bedrock)
-  turtlectl.py removezone <controller> <index>  -- remove a zone (see `zones` for its index)
+                         (targets a specific Y-band instead of digging to bedrock); --name
+                         is an optional, unique, operator-facing label (e.g. "diamonds")
+  turtlectl.py removezone <controller> <index>  -- remove a zone by its index or --name (see `zones`)
   turtlectl.py zones <controller>     -- list every configured zone; the fleet balances
                          evenly across all zones with room, not fill-one-then-overflow
   turtlectl.py addchest <controller> <x> <y> <z> [maxX maxY maxZ]
@@ -505,16 +506,25 @@ def build_shortcut(cmd, ns):
     if cmd == "addzone":
         fields = [ns.minX, ns.minZ, ns.maxX, ns.maxZ, ns.y, ns.capacity]
         args_str = ", ".join(str(f) for f in fields)
-        if ns.height is not None:
-            args_str += f", {ns.height}"
+        # height must be filled in (as `nil`) whenever name is given, even
+        # if height itself was omitted -- Lua has no keyword args, so
+        # addZone(...)'s 8th positional (name) can't be reached by just
+        # skipping the 7th (height) the way the CLI itself allows.
+        args_str += f", {ns.height if ns.height is not None else 'nil'}"
+        if ns.name is not None:
+            args_str += f", {lua_string(ns.name)}"
         command = f'return dofile("/dom-main/controller/worksite.lua").addZone({args_str})'
         description = f"add zone ({ns.minX},{ns.minZ})-({ns.maxX},{ns.maxZ}) y={ns.y} capacity={ns.capacity}"
         if ns.height is not None:
             description += f" height={ns.height}"
+        if ns.name is not None:
+            description += f' name="{ns.name}"'
         return description, command
 
     if cmd == "removezone":
-        return f"remove zone #{ns.index}", f'return dofile("/dom-main/controller/worksite.lua").removeZone({ns.index})'
+        target = ns.index
+        arg = target if re.fullmatch(r"-?\d+", target) else lua_string(target)
+        return f"remove zone {target}", f'return dofile("/dom-main/controller/worksite.lua").removeZone({arg})'
 
     if cmd == "zones":
         return "configured zones", 'return dofile("/dom-main/controller/worksite.lua").listZones()'
@@ -677,12 +687,13 @@ def build_console_parser():
     verp.add_argument("--bump", action="store_true")
 
     azp = sub.add_parser("addzone", add_help=False)
-    for name in ("minX", "minZ", "maxX", "maxZ", "y", "capacity"):
-        azp.add_argument(name, type=int)
+    for argname in ("minX", "minZ", "maxX", "maxZ", "y", "capacity"):
+        azp.add_argument(argname, type=int)
     azp.add_argument("height", nargs="?", type=int)
+    azp.add_argument("--name")
 
     rzp = sub.add_parser("removezone", add_help=False)
-    rzp.add_argument("index", type=int)
+    rzp.add_argument("index")
 
     sub.add_parser("zones", add_help=False)
 
@@ -733,11 +744,12 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   whoami [turtle]                              basic info about the controller, or that turtle if named
   mode [idle|passive|aggressive]               get or set the autopilot mode (omit to just report it)
   version [N] [--bump]                         get or set the controller's manually-tracked code version
-  addzone <minX> <minZ> <maxX> <maxZ> <y> <capacity> [height]
+  addzone <minX> <minZ> <maxX> <maxZ> <y> <capacity> [height] [--name NAME]
                                                 add a mining zone -- height caps blocks descended per
                                                 pass (targets a Y-band instead of digging to bedrock);
-                                                the fleet balances evenly across every zone with room
-  removezone <index>                           remove a zone (see `zones` for its index)
+                                                the fleet balances evenly across every zone with room;
+                                                --name is an optional, unique, operator-facing label
+  removezone <index>                           remove a zone by its index or --name (see `zones`)
   zones                                         list every configured zone
   addchest <x> <y> <z> [maxX maxY maxZ]        add a chest location (or range) to unload/refuel at --
                                                 multiple may be added; the nearest to a turtle is used
@@ -909,10 +921,13 @@ def main():
                       help="Caps how many blocks a pass descends before stopping on its own -- targets a "
                            "specific Y-band (e.g. y=174, height=81 covers down to y=93) instead of digging "
                            "to bedrock. Omit to dig to bedrock, as before.")
+    azp.add_argument("--name", help="Optional label (e.g. \"diamonds\") -- shown in `zones`, and usable in "
+                                     "place of a numeric index for `removezone`. Must be unique.")
 
-    rzp = sub.add_parser("removezone", parents=[waitp], help="Remove a zone by its index (see `zones`).")
+    rzp = sub.add_parser("removezone", parents=[waitp],
+                          help="Remove a zone by its index or name (see `zones`).")
     rzp.add_argument("controller")
-    rzp.add_argument("index", type=int)
+    rzp.add_argument("index", help="A zone's numeric index or its --name, if it has one.")
 
     zp = sub.add_parser("zones", parents=[waitp], help="List every configured mining zone.")
     zp.add_argument("controller")
