@@ -318,7 +318,24 @@ function M.place()
     M.blackbox("place.normalize_inventory", { ok = normalized == true })
     M.blackboxSlot("place.slot16_after_normalize", M.SLOT)
     if not normalized then
-      return nil, "no home-link chest in slot " .. M.SLOT
+      -- Not necessarily lost -- it may just be sitting exactly where an
+      -- earlier M.place() left it, if whatever ran that trip got cut
+      -- off (crash, reboot, chunk unload, an operator's stop landing in
+      -- the narrow window between M.place() and M.pickUp()) before ever
+      -- reaching the pickup half. M.recover() already knows how to walk
+      -- back to a recorded "placed" position and reclaim it from there
+      -- -- it's what dom-main/turtle_main.lua already runs once at boot
+      -- for exactly this reason. Trying it here too means a turtle
+      -- self-heals on its very next unload attempt instead of silently
+      -- falling back to the chestfinder indefinitely until it next
+      -- happens to reboot. A no-op (returns false fast) when there's no
+      -- "placed" record to chase, so this costs nothing in the common
+      -- case where the chest is genuinely just missing.
+      local recovered, recoverErr = M.recover()
+      M.blackbox("place.recover_stray_chest", { ok = recovered == true, info = recoverErr })
+      if not recovered then
+        return nil, "no home-link chest in slot " .. M.SLOT
+      end
     end
   end
   local gpsOk, gpsInfo = nav.reacquireGPS()
