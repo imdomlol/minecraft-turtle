@@ -133,15 +133,15 @@ local DEFAULTS = {
 
   -- stepDown/columnDY default differently depending on observant (see
   -- M.run() below, which resolves observant first): with observant on,
-  -- it's actively scanning every block already, so a bigger stepDown
-  -- (fewer, larger descents) is fine. With observant off, there's no
-  -- active left/right scanning at all, so a smaller stepDown (denser
-  -- switchback zigzag) leans on the geometry itself for coverage
-  -- instead -- and columnDY = stepDown / 2 (1 here, since
+  -- it's actively scanning every block already, so a four-block stepDown
+  -- leaves a three-block gap between horizontal legs. With observant
+  -- off, there's no active left/right scanning at all, so a smaller
+  -- stepDown (denser switchback zigzag) leans on the geometry itself for
+  -- coverage instead -- and columnDY = stepDown / 2 (1 here, since
   -- stepDownInattentive is 2) makes two adjacent width positions'
   -- combined leg depths land on *every* block, the densest possible
   -- interleave (see the columnDY tuning note near M.run() below).
-  stepDownObservant   = 5,
+  stepDownObservant   = 4,
   stepDownInattentive = 2,
   columnDYObservant   = 2,
   columnDYInattentive = 1,
@@ -171,6 +171,12 @@ local WIDTH_FACINGS = {
 -- Which world axis a compass name lies on -- used to check lengthFacing
 -- is perpendicular to widthFacing (see M.run() below).
 local AXIS_OF = { north = "z", south = "z", east = "x", west = "x" }
+
+-- The direction a leg turns to after its own 180 (see digColumn below) --
+-- used to track (not just blindly trust) which way a column is actually
+-- facing at any point, so a mid-column resume can explicitly restore it
+-- instead of assuming nav.lua's persisted heading is still correct.
+local OPPOSITE = { north = "south", south = "north", east = "west", west = "east" }
 
 -- Bounds dig retries -- see dom-main/mining/strip.lua for why this can't
 -- be unbounded (CraftOS's "too long without yielding" watchdog).
@@ -822,9 +828,28 @@ end
 -- unloadIfFull() failed -- see digForward/tunnelForward above; the whole
 -- job needs to stop, not just this pass) -- and a third value carrying
 -- the fatal error string, only present when reason == "fatal".
-local function digColumn(length, stepDown, height, observant, thorough, tidy, chestPos, unreachableNames, shouldStop, shouldRefuel, startDepth, onProgress)
+--
+-- startFacing is the compass direction the turtle is (already) facing
+-- when this call begins -- the caller (M.run()) is responsible for
+-- actually turning it there first; this function only tracks how that
+-- direction alternates across legs (the same 180 every leg already
+-- does) so onProgress(depth, currentFacing) can report the CURRENT
+-- correct direction at every checkpoint boundary, not just the pass's
+-- original one -- see M.run()'s own resume handling for why this
+-- matters: unloadIfFull()/ensureFuelFloor() (called once per dirIndex
+-- pass, and per leg step inside tunnelForward) can hand off to a
+-- completely different job (dom-main/controller/scheduler.lua's
+-- home-link-stuck sweep interrupting into recover_home_link, which
+-- explicitly re-faces the turtle toward wherever ITS chest is -- see
+-- lib/homelink.lua's M.recover()) -- confirmed live: resuming
+-- mine_vertical afterward on the old "trust nav.lua's persisted
+-- heading" assumption kept right on digging in whatever direction that
+-- unrelated recovery trip happened to leave the turtle facing, not the
+-- leg's own east/west (or whichever axis) alternation.
+local function digColumn(length, stepDown, height, observant, thorough, tidy, chestPos, unreachableNames, shouldStop, shouldRefuel, startDepth, startFacing, onProgress)
   local legCount = 0
   local depth = startDepth or 0
+  local currentFacing = startFacing
 
   while true do
     if shouldStop and shouldStop() then
@@ -851,8 +876,9 @@ local function digColumn(length, stepDown, height, observant, thorough, tidy, ch
     if fSteps == 0 then return legCount, "blocked" end
 
     nav.turnRight(); nav.turnRight()
+    currentFacing = OPPOSITE[currentFacing]
 
-    if onProgress then onProgress(depth) end
+    if onProgress then onProgress(depth, currentFacing) end
   end
 end
 
@@ -1076,6 +1102,12 @@ function M.run(params, shouldStop)
   -- cleared to nil right after being read, below, so every later pass in
   -- this run (resumed or not) starts a fresh descent from 0 as normal.
   local startDepth = resume and resume.depth or nil
+  -- The exact compass direction the turtle was actually facing at that
+  -- same checkpoint boundary (see digColumn's own onProgress -- tracked
+  -- there, not re-derived here, since it depends on how many legs of
+  -- THIS pass have alternated so far). Only meaningful alongside
+  -- startDepth; cleared right after being read for the same reason.
+  local startFacing = resume and resume.facing or nil
   -- Block names thorough has learned it can't actually mine (undiggable
   -- regardless of tool tier), so it stops re-chasing the same ore type
   -- from scratch every time a later leg step or width position grazes
@@ -1092,7 +1124,9 @@ function M.run(params, shouldStop)
     for dirIndex = startDirIndex, #lengthDirections do
       local dir = lengthDirections[dirIndex]
       local passStartDepth = startDepth
+      local passStartFacing = startFacing
       startDepth = nil
+      startFacing = nil
 
       if not ensureFuelFloor() then
         local fuelLevel = turtle.getFuelLevel()
@@ -1118,26 +1152,33 @@ function M.run(params, shouldStop)
         return false, unloadErr
       end
 
-      -- A resumed mid-pass (passStartDepth set) must NOT re-face `dir`
-      -- here: legs alternate direction via a 180 turn after every
-      -- completed cycle (see digColumn), so after an odd number of
-      -- completed legs the turtle is actually facing *back* toward
-      -- columnStart, not still facing `dir`. Forcing it back to `dir`
-      -- would silently corrupt that alternation and send the next leg
-      -- the wrong way. nav.lua's already-persisted heading is the
-      -- correct one to trust here; only a fresh pass (no resume depth)
-      -- needs to be pointed at `dir` at all.
-      if not passStartDepth then
-        nav.face(dir)
-      end
+      -- Always explicitly faced here now, never left to whatever nav.lua
+      -- currently happens to have -- a fresh pass faces `dir` itself;
+      -- a resumed mid-pass faces passStartFacing, the EXACT direction
+      -- digColumn's own onProgress recorded at that checkpoint boundary
+      -- (legs alternate via a 180 every cycle, so after an odd number of
+      -- completed legs that's `dir`'s opposite, not `dir` itself --
+      -- passStartFacing already accounts for that, unlike `dir` alone).
+      -- Confirmed live: trusting nav.lua's persisted heading instead
+      -- (an earlier version of this code did, specifically to avoid
+      -- forcing `dir` and corrupting the alternation) breaks the moment
+      -- anything else re-faces the turtle in between -- dom-main/
+      -- controller/scheduler.lua's home-link-stuck sweep can interrupt
+      -- an actively mining turtle straight into the recover_home_link
+      -- job, which explicitly turns to face wherever ITS chest is (see
+      -- lib/homelink.lua's M.recover()) -- and the turtle just kept
+      -- digging whatever direction THAT trip left it facing once
+      -- mine_vertical resumed from checkpoint afterward.
+      nav.face(passStartFacing or dir)
       print(("vertical: width %d, pass facing %s starting at (%d, %d, %d)")
-        :format(widthIndex, dir, columnStart.x, columnStart.y, columnStart.z))
+        :format(widthIndex, passStartFacing or dir, columnStart.x, columnStart.y, columnStart.z))
 
       local legCount, reason, fatal = digColumn(length, stepDown, height, observant, thorough, tidy, chestPos, unreachableNames, shouldStop,
         shouldRefuel,
         passStartDepth,
-        function(depth)
-          job.checkpoint({ widthIndex = widthIndex, dirIndex = dirIndex, columnStart = columnStart, dySign = dySign, depth = depth })
+        passStartFacing or dir,
+        function(depth, currentFacing)
+          job.checkpoint({ widthIndex = widthIndex, dirIndex = dirIndex, columnStart = columnStart, dySign = dySign, depth = depth, facing = currentFacing })
         end)
       print(("vertical: width %d pass done -- %d legs (%s), climbing back to start")
         :format(widthIndex, legCount, reason))

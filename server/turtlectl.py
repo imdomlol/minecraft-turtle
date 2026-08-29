@@ -953,7 +953,7 @@ mine's directions (must be perpendicular to each other):
                  position (west then east, or north then south) before offsetting,
                  doubling leg coverage with minimal extra backtracking
 
-mine's step sizes (default 5/2 with --observant, 2/1 without -- see below):
+mine's step sizes (default 4/2 with --observant, 2/1 without -- see below):
   step-down   blocks descended per leg step within a pass
   column-dy   start-height shift per new width position; alternates sign each
               time -- avoid a value that's a multiple of step-down (including 0),
@@ -968,7 +968,7 @@ mine's caps (default unlimited -- dig to bedrock / run forever):
 mine's three modes (all default true, --no-<mode> to disable):
   tidy       auto-unload into a chest when full, instead of just stopping
   observant  peek left/right on every leg step and every stepDown block (also
-             changes step-down/column-dy's own defaults: 5/2 with, 2/1 without)
+             changes step-down/column-dy's own defaults: 4/2 with, 2/1 without)
   thorough   chase veins of anything spotted -- up/down always, left/right only
              if observant -- works even with observant off
 
@@ -1185,7 +1185,7 @@ def main():
                           "Default: auto-picked perpendicular to --width-facing.")
     mp.add_argument("--length", type=int, help="Blocks per forward/backward leg (default 10).")
     mp.add_argument("--step-down", type=int,
-                     help="Blocks descended per leg step within a pass (default 5 with --observant, 2 without).")
+                     help="Blocks descended per leg step within a pass (default 4 with --observant, 2 without).")
     mp.add_argument("--height", type=int,
                      help="Cap blocks descended per pass before resetting, instead of digging to bedrock (default: no cap).")
     mp.add_argument("--width", type=int, help="Cap how many width positions to do (default: unlimited).")

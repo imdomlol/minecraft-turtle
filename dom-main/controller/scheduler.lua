@@ -77,7 +77,7 @@ local HOMELINK_RECOVER_TIMEOUT = 120 -- generous: recovery may involve a real tr
 local MINE_DEFAULT_LENGTH              = 10
 local MINE_DEFAULT_OBSERVANT           = true
 local MINE_DEFAULT_THOROUGH            = true
-local MINE_DEFAULT_STEP_DOWN_OBSERVANT = 5
+local MINE_DEFAULT_STEP_DOWN_OBSERVANT = 4
 local MINE_DEFAULT_STEP_DOWN_PLAIN     = 2
 local MINE_MAX_VEIN_BLOCKS             = 48
 

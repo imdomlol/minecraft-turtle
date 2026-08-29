@@ -29,6 +29,7 @@ if _G.__ROSTER_MODULE then return _G.__ROSTER_MODULE end
 
 local exec = dofile("/lib/exec.lua")
 local PROTOCOL = dofile("/lib/fleet.lua").PROTOCOL
+local safeserialize = dofile("/lib/safeserialize.lua")
 
 local DEFAULT_TIMEOUT = 60 -- seconds to wait for a proxied command's result
 
@@ -69,7 +70,7 @@ local dirty = false
 -- including fleet_listener -- the whole controller goes unreachable
 -- over one bad write.
 local function save()
-  local ok, encoded = pcall(textutils.serializeJSON, roster)
+  local ok, encoded = safeserialize.encode(roster)
   if not ok then
     print("roster: could not save state -- " .. tostring(encoded))
     return

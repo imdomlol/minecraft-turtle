@@ -962,7 +962,7 @@ permanently block the remote console:
 
 ```
 dofile("/lib/job.lua").request("mine_vertical", {
-  widthFacing = "north", lengthFacing = "all", length = 10, stepDown = 5,
+  widthFacing = "north", lengthFacing = "all", length = 10, stepDown = 4,
   height = 40, width = 20, minFuel = 500, columnStep = 1, columnDY = 2,
 })
 dofile("/lib/job.lua").stop()
@@ -981,7 +981,7 @@ dofile("/lib/job.lua").stop()
   perpendicular to `widthFacing`, or the job fails immediately with a
   clear error.
 - `length` (default 10): blocks dug per forward/backward leg.
-- `stepDown` (default 5 with `observant`, 2 without — see `observant`
+- `stepDown` (default 4 with `observant`, 2 without — see `observant`
   below): blocks descended per leg step within a pass.
 - `height` (default: none — dig to bedrock): caps how many blocks a
   single pass descends before resetting, even if bedrock is still

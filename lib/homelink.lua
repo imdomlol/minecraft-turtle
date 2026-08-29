@@ -33,6 +33,7 @@ local nav = dofile("/lib/nav.lua")
 local routing = dofile("/lib/routing.lua")
 local fuel = dofile("/lib/fuel.lua")
 local stats = dofile("/lib/stats.lua")
+local safeserialize = dofile("/lib/safeserialize.lua")
 
 local M = {}
 
@@ -97,7 +98,7 @@ end
 local function saveBlackbox()
   if not (blackbox and blackbox.sawEnderChest) then return end
   if not fs.exists("/state") then fs.makeDir("/state") end
-  local ok, encoded = pcall(textutils.serializeJSON, blackbox)
+  local ok, encoded = safeserialize.encode(blackbox)
   if not ok then
     print("homelink: could not save blackbox -- " .. tostring(encoded))
     return
@@ -143,7 +144,7 @@ local function archiveIncident(status, reason, forensics)
     forensics = forensics,
     blackbox = blackbox,
   }
-  local ok, encoded = pcall(textutils.serializeJSON, record)
+  local ok, encoded = safeserialize.encode(record)
   if not ok then
     print("homelink: could not archive lost-chest incident -- " .. tostring(encoded))
     return
@@ -293,7 +294,7 @@ end
 -- succeed), never crash the whole job over what's fundamentally a
 -- bookkeeping write.
 local function saveState(data)
-  local ok, encoded = pcall(textutils.serializeJSON, data)
+  local ok, encoded = safeserialize.encode(data)
   if not ok then
     print("homelink: could not save state -- " .. tostring(encoded))
     return

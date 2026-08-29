@@ -35,6 +35,7 @@ dom-main/controller/gpshost.lua
 lib/exec.lua
 lib/tasks.lua
 lib/stats.lua
+lib/safeserialize.lua
 lib/worldmap.lua
 lib/updater.lua
 lib/fuel.lua

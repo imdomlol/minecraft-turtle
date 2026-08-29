@@ -52,12 +52,14 @@
 
 if _G.__WORKSITE_MODULE then return _G.__WORKSITE_MODULE end
 
+local safeserialize = dofile("/lib/safeserialize.lua")
+
 local STATE_PATH = "/state/worksite.state"
 
 -- Blocks between width positions -- see dom-main/mining/vertical.lua's
 -- own tuning notes on columnDY/stepDown interleaving; this just needs to
 -- be "reasonably dense", not perfectly tuned.
-local COLUMN_STEP = 3
+local COLUMN_STEP = 1
 -- Kept clear at a cell's far edge so floating-point cell-boundary
 -- rounding can never push a leg one block into the next cell over.
 local LENGTH_MARGIN = 1
@@ -75,9 +77,14 @@ local M = {}
 local state -- { zones = { {minX,maxX,minZ,maxZ,y,height,capacity,cells,assignments}, ... }, chests = {...} }
 
 local function save()
+  local ok, encoded = safeserialize.encode(state)
+  if not ok then
+    print("worksite: could not save state -- " .. tostring(encoded))
+    return
+  end
   if not fs.exists("/state") then fs.makeDir("/state") end
   local f = fs.open(STATE_PATH, "w")
-  f.write(textutils.serializeJSON(state))
+  f.write(encoded)
   f.close()
 end
 

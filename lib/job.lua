@@ -119,7 +119,8 @@ end
 -- handling around a routine progress-save) should have to guard
 -- against itself.
 function M.checkpoint(data)
-  local ok, encoded = pcall(textutils.serializeJSON, { name = current.name, params = current.params, checkpoint = data })
+  local safeserialize = dofile("/lib/safeserialize.lua")
+  local ok, encoded = safeserialize.encode({ name = current.name, params = current.params, checkpoint = data })
   if not ok then
     print("job: could not save checkpoint -- " .. tostring(encoded))
     return
