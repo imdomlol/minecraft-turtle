@@ -96,6 +96,17 @@ end
 -- nothing there to drop into) is simply left as-is -- this doesn't
 -- retry or hunt for another container, so a chest that's itself full
 -- means those items just stay in inventory.
+--
+-- drop()'s own return value is deliberately NOT trusted on its own --
+-- confirmed live against a sophisticatedstorage chest: it reported
+-- success (true) for a slot whose full stack never actually left the
+-- turtle, with the chest confirmed not full at the time -- some
+-- destination inventories' APIs apparently tell CC:Tweaked "accepted"
+-- even when nothing was. turtle.getItemCount(slot) == 0 is checked
+-- straight after every drop() to catch exactly this, so `emptied` (and
+-- anything that trusts it, e.g. this file's own M.isEmpty()) reflects
+-- what's actually still in the turtle's inventory, not what a
+-- destination merely claimed.
 function M.dropAll(direction)
   direction = direction or "front"
   local drop = turtle.drop
@@ -109,7 +120,8 @@ function M.dropAll(direction)
       homelink.moveToReserved(slot)
     elseif turtle.getItemCount(slot) > 0 then
       turtle.select(slot)
-      if drop() then emptied = emptied + 1 end
+      drop()
+      if turtle.getItemCount(slot) == 0 then emptied = emptied + 1 end
     end
   end
   turtle.select(originalSlot)
