@@ -142,6 +142,13 @@ local function listenLoop(ident, controllerId, startExec)
         -- carry the real table directly instead.
         local entries = dofile("/lib/worldmap.lua").drain(message.max_entries)
         rednet.send(controllerId, { type = "blocks", entries = entries }, PROTOCOL)
+      elseif message.type == "get_stats" then
+        -- Same reasoning as "pull_blocks"/"blocks" above -- lib/stats.lua's
+        -- report is a real table (resource counts by item name, plus
+        -- several plain counters); sending it as a typed reply keeps it
+        -- one, instead of round-tripping through exec/"result" text.
+        local report = dofile("/lib/stats.lua").report()
+        rednet.send(controllerId, { type = "stats", report = report }, PROTOCOL)
       elseif message.type == "rename" and message.name then
         print("fleet: controller renamed us to " .. message.name .. " (collision)")
         dofile("/lib/identity.lua").set(message.name)

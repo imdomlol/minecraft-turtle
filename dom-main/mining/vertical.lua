@@ -118,6 +118,7 @@ local homelink = dofile("/lib/homelink.lua")
 local ores = dofile("/lib/ores.lua")
 local fuel = dofile("/lib/fuel.lua")
 local job = dofile("/lib/job.lua")
+local stats = dofile("/lib/stats.lua")
 
 local M = {}
 
@@ -487,6 +488,40 @@ local MAX_CHESTS_PER_UNLOAD = 20
 -- direction (this turtle placed it itself, one line above).
 local SUCK_BY_DIRECTION = { front = turtle.suck, up = turtle.suckUp, down = turtle.suckDown }
 
+-- Every non-reserved slot's contents, by item name -- lib/stats.lua's
+-- own resource counters are built from the DELTA between one of these
+-- taken right before a deposit attempt and another right after (see
+-- recordDroppedDelta() below), not from what dropAll() itself reports
+-- (a slot count, not item identities) and not from watching every dig()
+-- call (scattered across many different code paths above, several of
+-- which don't go through this file's own inventory handling at all).
+local function snapshotCargoByName()
+  local counts = {}
+  for slot = 1, 16 do
+    if slot ~= homelink.SLOT then
+      local detail = turtle.getItemDetail(slot)
+      if detail then counts[detail.name] = (counts[detail.name] or 0) + detail.count end
+    end
+  end
+  return counts
+end
+
+-- Records whatever actually left inventory between `before` (a
+-- snapshotCargoByName() taken right before a dropAll() call) and right
+-- now -- works the same whether that drop fully succeeded, partially
+-- succeeded, or did nothing at all, and never double-counts across the
+-- retry loops both deposit paths use, since each call only ever measures
+-- what changed since ITS OWN "before".
+local function recordDroppedDelta(before)
+  local after = snapshotCargoByName()
+  local delta = {}
+  for name, beforeCount in pairs(before) do
+    local dropped = beforeCount - (after[name] or 0)
+    if dropped > 0 then delta[#delta + 1] = { name = name, count = dropped } end
+  end
+  if #delta > 0 then stats.recordResources(delta) end
+end
+
 -- How many refuel/deposit cycles to retry while the chest stays
 -- confirmed present (homelink.isPresent()) -- operator policy: a
 -- refuel/deposit hiccup (chest temporarily out of fuel stock, chest
@@ -516,6 +551,7 @@ local function tryHomeLink()
   if not direction then
     return false, placeErr, "unavailable"
   end
+  stats.recordEnderChestPlacement()
 
   for attempt = 1, HOME_LINK_TRANSFER_ATTEMPTS do
     if not homelink.isPresent(direction) then break end
@@ -542,7 +578,9 @@ local function tryHomeLink()
 
     homelink.blackboxInspect("transfer.inspect_expected_block_before_deposit", direction)
     homelink.blackboxSlot("transfer.slot16_before_deposit", homelink.SLOT)
+    local beforeDrop = snapshotCargoByName()
     local dropped = inventory.dropAll(direction)
+    recordDroppedDelta(beforeDrop)
     homelink.blackbox("transfer.deposit_to_home_link", { emptiedSlots = dropped })
 
     if inventory.isEmpty() then break end
@@ -563,6 +601,8 @@ local function unloadIfFull(tidy, chestPos)
   if not tidy then
     return false, "inventory full (tidy disabled)"
   end
+
+  stats.recordDepositCycle()
 
   local homeOk, homeErr, homeReason = tryHomeLink()
   if homeOk then return true end
@@ -621,12 +661,15 @@ local function unloadIfFull(tidy, chestPos)
 
     local chestEmptied = 0
     while not inventory.isEmpty() do
+      local beforeDrop = snapshotCargoByName()
       local emptied = inventory.dropAll(found.direction)
+      recordDroppedDelta(beforeDrop)
       if emptied == 0 then break end
       chestEmptied = chestEmptied + emptied
       totalEmptied = totalEmptied + emptied
     end
 
+    stats.recordCommunityChestVisit()
     chestsUsed = chestsUsed + 1
     print(("vertical: unloaded %d slot(s) into chest at (%d, %d, %d)")
       :format(chestEmptied, found.x, found.y, found.z))

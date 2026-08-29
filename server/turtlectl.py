@@ -57,6 +57,10 @@ Usage:
                          on stdout (pipe to your own script), keeps jsonfile patched in place
   turtlectl.py gpshost <controller> [x y z]  -- get (no args) or set this controller's own GPS
                          anchor position -- see dom-main/controller/gpshost.lua
+  turtlectl.py fleetstats <controller>  -- every known turtle's resource/deposit-cycle
+                         counters (lib/stats.lua), pulled concurrently and merged into one
+                         fleet-wide total plus the per-turtle breakdown. In-memory only on
+                         each turtle -- resets whenever THAT turtle reboots.
 
 Shortcuts for common turtle-side calls, so you don't have to remember
 which lib/*.lua file or function each one is, or which are background
@@ -86,6 +90,10 @@ named turtle:
                          -- find a chest and empty the inventory into it; no
                          -- coords searches near the turtle (radius 8 default),
                          -- coords with no radius means exactly there (radius 0)
+  turtlectl.py stats <controller> <turtle>  -- this turtle's own resource/deposit-cycle
+                         counters (lib/stats.lua) for the current boot session -- in-memory
+                         only, resets on reboot; see the fleetstats shortcut above for the
+                         whole-fleet merged version
 
 --dig on its own (or --dig safe) never digs through a chest or a
 ComputerCraft block (another turtle, computer, modem, etc) -- it routes
@@ -574,6 +582,9 @@ def build_shortcut(cmd, ns):
         params = "{ " + ", ".join(fields) + " }"
         return f"dump inventory {params}", f'return dofile("/lib/chestfinder.lua").dump({params})'
 
+    if cmd == "stats":
+        return "this session's resource/deposit stats", 'return dofile("/lib/stats.lua").report()'
+
     if cmd == "whoami":
         if getattr(ns, "turtle", None):
             command = (
@@ -623,6 +634,10 @@ def build_shortcut(cmd, ns):
 
     if cmd == "ignored":
         return "ignored turtles", 'return dofile("/dom-main/controller/mode.lua").listIgnored()'
+
+    if cmd == "fleetstats":
+        return ("fleet-wide resource/deposit stats (merged + per-turtle)",
+                'return dofile("/dom-main/controller/roster.lua").fleetStats()')
 
     if cmd == "version":
         if getattr(ns, "bump", False):
@@ -687,11 +702,12 @@ def build_shortcut(cmd, ns):
 
 TURTLE_SHORTCUTS = {
     "goto", "mine", "stop", "jobstatus", "pos", "setpos", "gpsfix", "turnleft", "turnright",
-    "inv", "home", "markhome", "findchest", "dump",
+    "inv", "home", "markhome", "findchest", "dump", "stats",
 }
 CONTROLLER_SHORTCUTS = {
     "roster", "worldblock", "mode", "version", "addzone", "removezone", "zones",
     "ignore", "unignore", "ignored", "addchest", "removechest", "chests", "gpshost",
+    "fleetstats",
 }
 # These are the shortcuts where <turtle> is optional -- see their
 # build_shortcut() branches and the unified dispatch below.
@@ -796,6 +812,11 @@ def build_console_parser():
     dp.add_argument("--z", type=int)
     dp.add_argument("--radius", type=int)
 
+    stp = sub.add_parser("stats", add_help=False)
+    stp.add_argument("turtle")
+
+    sub.add_parser("fleetstats", add_help=False)
+
     sub.add_parser("roster", add_help=False)
 
     wbp = sub.add_parser("worldblock", add_help=False)
@@ -877,6 +898,10 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   findchest <turtle> [--x N --y N --z N] [--radius N]   search for a nearby chest
   dump <turtle> [--x N --y N --z N] [--radius N]        find a chest and empty the inventory into it
                                                 (see below for how --x/--y/--z and --radius interact)
+  stats <turtle>                               this turtle's own resource/deposit-cycle counters
+                                                for the current boot session (in-memory, resets on reboot)
+  fleetstats                                   every known turtle's stats, merged into one fleet-wide
+                                                total plus the per-turtle breakdown
   roster                                       every turtle this controller currently knows about
   worldblock <x> <y> <z>                       block recorded at that coordinate, or None
   whoami [turtle]                              basic info about the controller, or that turtle if named
@@ -1060,6 +1085,18 @@ def main():
     ignp = sub.add_parser("ignored", parents=[waitp],
                            help="List turtles currently ignored by the controller autopilot.")
     ignp.add_argument("controller")
+
+    stp = sub.add_parser("stats", parents=[waitp],
+                          help="This turtle's own resource/deposit-cycle counters for the current "
+                               "boot session (resets on reboot).")
+    stp.add_argument("controller")
+    stp.add_argument("turtle")
+
+    fsp = sub.add_parser("fleetstats", parents=[waitp],
+                          help="Every known turtle's resource/deposit-cycle counters, pulled "
+                               "concurrently and merged into one fleet-wide total (plus the "
+                               "per-turtle breakdown). Resets per turtle on its own reboot.")
+    fsp.add_argument("controller")
 
     verp = sub.add_parser("version", parents=[waitp],
                            help="Get or set the controller's manually-tracked code version.")

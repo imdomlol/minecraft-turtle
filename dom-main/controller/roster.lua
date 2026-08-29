@@ -396,6 +396,39 @@ function M.pullBlocks(name, maxEntries, timeoutSeconds)
   end
 end
 
+-- Requests THIS session's lib/stats.lua counters from turtle `name` and
+-- blocks (up to timeoutSeconds) for the reply -- same dedicated
+-- message-pair reasoning as M.pullBlocks() above (a real table over
+-- rednet, not round-tripped through M.proxy()'s exec/"result" text).
+-- Returns the report table ({ resources, enderChestPlacements,
+-- communityChestVisits, depositCycles }) on success, or nil, reason.
+function M.pullStats(name, timeoutSeconds)
+  local entry = roster[name]
+  if not entry then return nil, "unknown turtle: " .. tostring(name) end
+
+  rednet.send(entry.computerId, { type = "get_stats" }, PROTOCOL)
+
+  local deadline = os.clock() + (timeoutSeconds or DEFAULT_TIMEOUT)
+  while true do
+    local remaining = deadline - os.clock()
+    if remaining <= 0 then
+      return nil, "timeout waiting for " .. name
+    end
+    local senderId, message = rednet.receive(PROTOCOL, remaining)
+    if senderId == nil then
+      return nil, "timeout waiting for " .. name
+    end
+    if type(message) == "table" then
+      if senderId == entry.computerId and message.type == "stats" then
+        return message.report
+      end
+      -- Not our reply -- still worth recording, same reasoning as
+      -- M.proxy()'s identical wait loop above.
+      M.handleMessage(senderId, message)
+    end
+  end
+end
+
 -- Concurrent M.proxy() calls at once inside M.proxyAll() below -- a
 -- safety valve against firing an unbounded rednet burst at a
 -- few-hundred-turtle fleet size, not load-bearing logic. Batches run one
@@ -442,6 +475,46 @@ function M.proxyAll(command, timeoutSeconds)
     parallel.waitForAll(unpack(batchTasks))
   end
   return out
+end
+
+-- Every currently-known turtle's lib/stats.lua report, pulled
+-- concurrently (same batching as M.proxyAll() -- see PROXY_ALL_BATCH_SIZE
+-- above) and merged into one combined total -- for server/turtlectl.py's
+-- `fleetstats`. A turtle that timed out is simply excluded from the
+-- merge (its own entry under `byTurtle` still shows the error) rather
+-- than failing the whole report over one unreachable turtle. Returns
+-- { merged = { resources, enderChestPlacements, communityChestVisits,
+-- depositCycles }, byTurtle = { [name] = report or { error = reason } } }.
+function M.fleetStats(timeoutSeconds)
+  local names = {}
+  for name in pairs(roster) do names[#names + 1] = name end
+
+  local byTurtle = {}
+  for batchStart = 1, #names, PROXY_ALL_BATCH_SIZE do
+    local batchTasks = {}
+    for i = batchStart, math.min(batchStart + PROXY_ALL_BATCH_SIZE - 1, #names) do
+      local name = names[i]
+      batchTasks[#batchTasks + 1] = function()
+        local report, err = M.pullStats(name, timeoutSeconds)
+        byTurtle[name] = report or { error = err }
+      end
+    end
+    parallel.waitForAll(unpack(batchTasks))
+  end
+
+  local merged = { resources = {}, enderChestPlacements = 0, communityChestVisits = 0, depositCycles = 0 }
+  for _, report in pairs(byTurtle) do
+    if not report.error then
+      for itemName, count in pairs(report.resources or {}) do
+        merged.resources[itemName] = (merged.resources[itemName] or 0) + count
+      end
+      merged.enderChestPlacements = merged.enderChestPlacements + (report.enderChestPlacements or 0)
+      merged.communityChestVisits = merged.communityChestVisits + (report.communityChestVisits or 0)
+      merged.depositCycles = merged.depositCycles + (report.depositCycles or 0)
+    end
+  end
+
+  return { merged = merged, byTurtle = byTurtle }
 end
 
 _G.__ROSTER_MODULE = M
