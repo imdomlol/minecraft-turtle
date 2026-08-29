@@ -145,6 +145,17 @@ local function selfRefuelTarget(entry, chest, name)
   return fuel.safeReturnFuel(entry.position, chest) + miningFuelBudget(entry, name)
 end
 
+-- Whether `entry` currently reports carrying its own home-link chest
+-- (see lib/fleet.lua's own heartbeat comment) -- checked BEFORE
+-- hasInventoryFuel() below in M.tick()'s stranded-turtle branch: an
+-- AE2-stocked home-link chest is a far more complete refuel than
+-- whatever loose fuel items happen to be sitting in inventory, and
+-- (same as that check) needs no travel at all, so it's tried first
+-- rather than tying up a second turtle on a full rescue.
+function M.hasHomeLinkChest(entry)
+  return entry.hasHomeLink == true
+end
+
 local function hasInventoryFuel(entry)
   return type(entry.fuelItems) == "number" and entry.fuelItems > 0
 end
@@ -518,6 +529,39 @@ function M.dispatchToChest(name, entry)
   return M.assignWork(name)
 end
 
+-- Before falling back to loose inventory fuel items (M.refuelFromInventory()
+-- below) or a full rescue, let a stranded turtle that's still carrying
+-- its own home-link chest place it right where it's standing and refuel
+-- from it (lib/homelink.lua's own M.refuelTo() -- no travel required,
+-- same as M.refuelFromInventory(), but an AE2-stocked chest can supply
+-- far more fuel than a handful of loose items, and never simply runs
+-- out the way those can). Mirrors M.attemptRescue()'s own dynamic refuel
+-- target (lib/fuel.lua's M.safeReturnFuel() from the stranded turtle's
+-- own position, plus its mining pass's own fuel budget).
+--
+-- A "stuck" outcome (chest placed but not retrievable) is deliberately
+-- NOT specially handled here -- lib/homelink.lua's M.pickUp() already
+-- records that correctly, and dom-main/controller/scheduler.lua's own
+-- M.checkHomeLink() sweep (this same file, runs independently of
+-- idle/stranded status) picks it up from there within HOMELINK_STALE_MS,
+-- same safety net as every other "placed but not yet recovered" case.
+function M.refuelFromHomeLink(name, entry)
+  local chest = M.hasKnownPosition(entry) and worksite.nearestChest(entry.position)
+  local target = chest and selfRefuelTarget(entry, chest, name) or 1
+  print("scheduler: " .. name .. " is stranded but carries its own home-link chest -- refueling in place before rescue")
+  local ok, output = roster.proxy(name,
+    "local ok, reason = dofile(\"/lib/homelink.lua\").refuelTo(" .. target .. "); "
+      .. "if not ok then error(tostring(reason), 0) end; "
+      .. "return true, \"refueled to \" .. tostring(turtle.getFuelLevel())",
+    REFUEL_TRIP_TIMEOUT)
+  if not ok then
+    print("scheduler: " .. name .. " could not refuel from its own home-link chest: " .. tostring(output))
+    return false, output
+  end
+  print("scheduler: " .. name .. " refueled from its own home-link chest -- sending it back to its cell")
+  return M.assignWork(name)
+end
+
 -- Before dispatching a separate rescue turtle, let a stranded turtle
 -- burn fuel items it is already carrying. This covers the common
 -- handoff edge case where a rescuer successfully dropped coal into the
@@ -631,6 +675,8 @@ function M.tick()
       dispatched[name] = true
       if not M.hasKnownPosition(entry) then
         print("scheduler: " .. name .. " is stranded but has no reliable position -- needs a manual `setpos` before it can be rescued")
+      elseif M.hasHomeLinkChest(entry) then
+        tasks[#tasks + 1] = function() M.refuelFromHomeLink(name, entry) end
       elseif hasInventoryFuel(entry) then
         tasks[#tasks + 1] = function() M.refuelFromInventory(name, entry) end
       else

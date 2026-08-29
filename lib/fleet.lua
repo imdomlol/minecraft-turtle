@@ -105,6 +105,7 @@ local function sendHeartbeat(ident, controllerId)
   local nav = dofile("/lib/nav.lua")
   local job = dofile("/lib/job.lua")
   local fuel = dofile("/lib/fuel.lua")
+  local homelink = dofile("/lib/homelink.lua")
 
   rednet.send(controllerId, {
     type = "heartbeat",
@@ -116,6 +117,12 @@ local function sendHeartbeat(ident, controllerId)
     -- dom-main/controller/scheduler.lua's fuel-rescue can actually
     -- hand to a stranded turtle.
     fuelItems = fuel.spareFuelItems(),
+    -- Lets dom-main/controller/scheduler.lua's stranded-turtle rescue
+    -- prefer a self-serve home-link refuel (lib/homelink.lua's own
+    -- M.refuelTo(), no travel needed) over dispatching a whole second
+    -- rescuer turtle, whenever this turtle is still carrying its own
+    -- chest.
+    hasHomeLink = homelink.isItem(homelink.SLOT),
     position = nav.getPosition(),
     job = job.status(),
     uptime = os.clock(),

@@ -14,18 +14,25 @@
   (see that file's own RESERVED_SLOT comment); keep the two in sync if
   this ever changes.
 
-  This module only handles getting the chest itself into and out of the
-  world reliably. Once M.place() returns a direction, use the EXISTING
-  primitives for the actual transfer -- lib/inventory.lua's M.dropAll()
-  for loot, lib/fuel.lua's M.ensureFuel() for fuel (its own drain() logic
-  already checks front/up/down, so whichever direction the chest landed
-  in just works) -- rather than duplicating either here.
+  This module mostly just handles getting the chest itself into and out
+  of the world reliably. Once M.place() returns a direction, a caller
+  driving its own multi-step transfer (e.g. dom-main/mining/vertical.lua's
+  tryHomeLink(), which also has to interleave a cargo deposit) should use
+  the EXISTING primitives directly -- lib/inventory.lua's M.dropAll() for
+  loot, lib/fuel.lua's M.refuelFrom() for fuel -- rather than duplicating
+  either here. M.refuelTo() below is the one exception: a self-contained
+  place -> refuel -> pick back up cycle for a caller that ONLY needs fuel
+  (dom-main/controller/scheduler.lua's stranded-turtle self-serve path),
+  with no cargo step to interleave and no reason to make every such
+  caller re-derive the same place/retry/pickup sequence on its own.
 ------------------------------------------------------------------------]]
 
 if _G.__HOMELINK_MODULE then return _G.__HOMELINK_MODULE end
 
 local nav = dofile("/lib/nav.lua")
 local routing = dofile("/lib/routing.lua")
+local fuel = dofile("/lib/fuel.lua")
+local stats = dofile("/lib/stats.lua")
 
 local M = {}
 
@@ -109,6 +116,70 @@ local function beginBlackbox(reason)
   }
 end
 
+-- Permanent, timestamped archive of the blackbox session for every
+-- CONFIRMED chest loss (see markLost() below -- never for a merely
+-- retriable hiccup). Unlike M.blackbox()'s own single rolling session
+-- (overwritten by the very next M.place() call, e.g. once a turtle
+-- recovers or an operator manually fixes things), one file per incident
+-- here, so it survives exactly the kind of after-the-fact investigation
+-- that had nothing left to look at tonight -- confirmed live: by the
+-- time this was needed, the live session had already been overwritten
+-- by a fresh, healthy one.
+local INCIDENTS_DIR = "/state/homelink_incidents"
+-- Oldest pruned first once this many incident files pile up -- this is a
+-- forensic log, not unbounded storage, and disk here is a real, shared,
+-- bounded per-computer quota (see dom-main/controller/worldstore.lua's
+-- own MIN_FREE_SPACE_BYTES comment for the exact failure this avoids).
+-- Chest losses should be rare; 50 retained incidents is generous
+-- headroom, not a tight budget.
+local MAX_INCIDENT_FILES = 50
+
+local function archiveIncident(status, reason, forensics)
+  if not fs.exists(INCIDENTS_DIR) then fs.makeDir(INCIDENTS_DIR) end
+  local record = {
+    lostAt = now(),
+    status = status,
+    reason = reason,
+    forensics = forensics,
+    blackbox = blackbox,
+  }
+  local ok, encoded = pcall(textutils.serializeJSON, record)
+  if not ok then
+    print("homelink: could not archive lost-chest incident -- " .. tostring(encoded))
+    return
+  end
+  local path = INCIDENTS_DIR .. "/" .. tostring(record.lostAt) .. ".json"
+  local f = fs.open(path, "w")
+  f.write(encoded)
+  f.close()
+
+  local files = fs.list(INCIDENTS_DIR)
+  if #files > MAX_INCIDENT_FILES then
+    table.sort(files)
+    for i = 1, #files - MAX_INCIDENT_FILES do
+      fs.delete(INCIDENTS_DIR .. "/" .. files[i])
+    end
+  end
+end
+
+function M.listIncidents()
+  if not fs.exists(INCIDENTS_DIR) then return {} end
+  local files = fs.list(INCIDENTS_DIR)
+  table.sort(files)
+  return files
+end
+
+function M.getIncident(filename)
+  local path = INCIDENTS_DIR .. "/" .. tostring(filename)
+  if not fs.exists(path) then return nil end
+  local f = fs.open(path, "r")
+  local text = f.readAll()
+  f.close()
+  local ok, decoded = pcall(textutils.unserializeJSON, text)
+  if ok and type(decoded) == "table" then return decoded end
+  return nil
+end
+
 -- Oldest dropped first once a single blackbox session (see
 -- beginBlackbox()'s own comment on when a fresh one starts) accumulates
 -- this many events -- a long run of retries against the same "placed"
@@ -164,15 +235,26 @@ local function firstEmptySlot(except)
   return nil
 end
 
+-- Never blind-drops as a last resort (an earlier version did:
+-- turtle.dropDown() or turtle.drop() or turtle.dropUp(), whichever
+-- direction happened to succeed first) -- confirmed live: this is exactly
+-- what deposited a turtle's own home-link chest into the communal site
+-- chest. Slot 16 being blocked by something that isn't the chest, with no
+-- spare slot free, only happens while the turtle is at some chest to
+-- unload cargo into in the first place -- so "drop whatever's blocking
+-- it in whatever direction works" reliably means "into that very chest"
+-- whenever what's actually blocking slot 16 is a second, stray
+-- chest-named item (e.g. dug up incidentally from an old abandoned one
+-- elsewhere) that a caller is trying to move OUT of the way. Failing
+-- loudly here instead is safe: every call site already treats a false
+-- return as a real failure (pickup_failed / job stop), never as license
+-- to discard anything.
 local function clearReservedSlot(avoidSlot)
   if turtle.getItemCount(M.SLOT) == 0 or M.isItem(M.SLOT) then return true end
   local spare = firstEmptySlot(avoidSlot or M.SLOT)
-  if spare then
-    turtle.select(M.SLOT)
-    return turtle.transferTo(spare)
-  end
+  if not spare then return false end
   turtle.select(M.SLOT)
-  return turtle.dropDown() or turtle.drop() or turtle.dropUp()
+  return turtle.transferTo(spare)
 end
 
 function M.moveToReserved(slot)
@@ -290,6 +372,18 @@ local function markPickup(status, reason, forensics)
     for k, v in pairs(forensics) do previous[k] = v end
   end
   saveState(previous)
+end
+
+-- The ONLY three places a chest is ever confirmed genuinely gone, not
+-- just stuck/blocked/unreachable (operator policy: only a chest
+-- CONFIRMED absent is a reason to stop retrying -- see M.pickUp()'s own
+-- comment) -- call this instead of markPickup("pickup_failed", ...)
+-- directly at exactly those three spots, so a permanent, timestamped
+-- record survives regardless of whatever place()/pickUp() session comes
+-- next and overwrites the rolling blackbox.
+local function markLost(reason, forensics)
+  archiveIncident("pickup_failed", reason, forensics)
+  markPickup("pickup_failed", reason, forensics)
 end
 
 function M.getState()
@@ -450,34 +544,32 @@ local function attemptPickUp(direction)
     return M.isItem(slot)
   end
 
-  local function dropAwayFromChest()
-    if direction ~= "down" then return turtle.dropDown() end
-    return turtle.drop()
-  end
-
   M.blackboxInspect("pickup.inspect_expected_block_before_cleanup", direction)
   M.blackboxSlot("pickup.slot16_before_cleanup", M.SLOT)
   local slotDetail = turtle.getItemDetail(M.SLOT)
+  -- Moves whatever's wrongly sitting in slot 16 to a spare cargo slot --
+  -- never drops it, blindly or otherwise (see clearReservedSlot()'s own
+  -- comment: a blind "drop it in whatever direction works" is exactly
+  -- what deposited a turtle's own home-link chest into the communal site
+  -- chest, since the only time this branch is reached is while the
+  -- turtle is standing at some chest anyway). No spare slot is a real
+  -- failure, not license to discard anything.
   if slotDetail and slotDetail.name ~= ITEM_NAME then
-    turtle.select(M.SLOT)
-    local dropped = dropAwayFromChest()
-    M.blackbox("pickup.slot16_wrong_item_drop_away", {
+    local spare = firstEmptySlot(M.SLOT)
+    M.blackbox("pickup.slot16_blocked_before_pickup", {
       item = { name = slotDetail.name, count = slotDetail.count },
-      dropped = dropped == true,
+      spare = spare,
     })
-    if turtle.getItemCount(M.SLOT) > 0 then
-      local spare = firstEmptySlot(M.SLOT)
-      M.blackbox("pickup.slot16_still_blocked_after_drop", { spare = spare })
-      if not spare then
-        return false, "not picking the home-link chest up while slot " .. M.SLOT
-          .. " is blocked and no spare slot is available"
-      end
-      local moved = turtle.transferTo(spare)
-      M.blackbox("pickup.slot16_wrong_item_moved_to_spare", { spare = spare, moved = moved == true })
-      if not moved then
-        return false, "not picking the home-link chest up because slot " .. M.SLOT
-          .. " could not be cleared"
-      end
+    if not spare then
+      return false, "not picking the home-link chest up while slot " .. M.SLOT
+        .. " is blocked and no spare slot is available"
+    end
+    turtle.select(M.SLOT)
+    local moved = turtle.transferTo(spare)
+    M.blackbox("pickup.slot16_wrong_item_moved_to_spare", { spare = spare, moved = moved == true })
+    if not moved then
+      return false, "not picking the home-link chest up because slot " .. M.SLOT
+        .. " could not be cleared"
     end
   end
   M.blackboxSlot("pickup.slot16_after_cleanup", M.SLOT)
@@ -501,7 +593,7 @@ local function attemptPickUp(direction)
     name = preDigName,
   })
   if not (preDigFound and nav.isChest(preDigName)) then
-    markPickup("pickup_failed", "expected chest not present before digging (saw: "
+    markLost("expected chest not present before digging (saw: "
       .. tostring(preDigName or "nothing") .. ")", { preDig = preDigName or false })
     return false, "home-link chest is no longer at the expected position (saw: "
       .. tostring(preDigName or "nothing") .. ") -- something else happened to it before pickup"
@@ -541,9 +633,16 @@ local function attemptPickUp(direction)
         slot = slot,
         count = turtle.getItemCount(slot),
       })
+      -- Confirmed present and just dug up (this whole branch only runs
+      -- after that) -- a full slot 16 or a failed transfer here is a
+      -- retriable inventory-management hiccup, NOT a lost chest (operator
+      -- policy: only a confirmed-absent chest is terminal -- see this
+      -- file's own markLost() comment). Re-stamping "placed" keeps
+      -- dom-main/controller/scheduler.lua's recovery sweep retrying
+      -- instead of abandoning a chest that's demonstrably still in hand.
       if turtle.getItemCount(M.SLOT) > 0 and not isChest(M.SLOT) then
         if not clearReservedSlot(slot) then
-          markPickup("pickup_failed", "slot " .. M.SLOT .. " blocked and no spare slot is available")
+          markPickup("placed", "slot " .. M.SLOT .. " blocked and no spare slot is available")
           return false, "dug the home-link chest into slot " .. slot
             .. " but slot " .. M.SLOT .. " is blocked and no spare slot is available"
         end
@@ -552,7 +651,7 @@ local function attemptPickUp(direction)
       local moved = turtle.transferTo(M.SLOT)
       M.blackbox("pickup.move_recovered_chest_to_slot16", { from = slot, moved = moved == true })
       if not moved then
-        markPickup("pickup_failed", "could not move recovered chest back to slot " .. M.SLOT)
+        markPickup("placed", "could not move recovered chest back to slot " .. M.SLOT)
         return false, "dug the home-link chest into slot " .. slot
           .. " but could not move it back to slot " .. M.SLOT
       end
@@ -577,7 +676,7 @@ local function attemptPickUp(direction)
       if turtle.getItemCount(slot) > (before[slot] or 0) and isChest(slot) then
         if slot ~= M.SLOT then
           if turtle.getItemCount(M.SLOT) > 0 and not isChest(M.SLOT) and not clearReservedSlot(slot) then
-            markPickup("pickup_failed", "recovered via floor pickup into slot " .. slot
+            markPickup("placed", "recovered via floor pickup into slot " .. slot
               .. " but slot " .. M.SLOT .. " is blocked and no spare slot is available")
             return false, "recovered the home-link chest off the floor into slot " .. slot
               .. " but slot " .. M.SLOT .. " is blocked and no spare slot is available"
@@ -597,7 +696,7 @@ local function attemptPickUp(direction)
 
   M.blackboxInventory("pickup.inventory_final_failure_scan")
   M.blackboxInspect("pickup.inspect_expected_location_final_failure", direction)
-  markPickup("pickup_failed", "confirmed a real chest was dug (preDig saw " .. tostring(preDigName)
+  markLost("confirmed a real chest was dug (preDig saw " .. tostring(preDigName)
     .. ") but no ender chest item ever appeared in inventory, including after a floor-pickup retry -- genuinely lost",
     { preDig = preDigName, floorRetry = true })
   return false, "dug the home-link chest but it never reappeared in inventory, even after a floor-pickup retry -- may be lost"
@@ -692,7 +791,7 @@ function M.recover()
     -- This IS the confirmed-gone case -- operator policy: only reason to
     -- ever stop retrying and treat the local chest as abandoned.
     local reason = "recorded home-link chest is no longer present at the saved position"
-    markPickup("pickup_failed", reason)
+    markLost(reason)
     return false, reason
   end
 
@@ -702,6 +801,57 @@ function M.recover()
   local picked, pickInfo = M.pickUp(saved.direction)
   if not picked then return false, pickInfo end
   return true, pickInfo or "recovered placed home-link chest"
+end
+
+-- Maps a placed direction to the matching turtle.suck*() function -- see
+-- dom-main/mining/vertical.lua's own SUCK_BY_DIRECTION for why
+-- lib/fuel.lua's M.refuelFrom() (not M.ensureFuel()) is the right call
+-- here: ensureFuel()'s drain() only pulls from a direction whose block
+-- NAME looks like "chest", and this module's own ITEM_NAME confirms
+-- EnderStorage's real registry name doesn't reliably match that.
+local SUCK_BY_DIRECTION = { front = turtle.suck, up = turtle.suckUp, down = turtle.suckDown }
+
+-- Places the home-link chest wherever the turtle currently is and tries
+-- to refuel from it, then picks it back up -- no travel required, so a
+-- turtle that's simply low on fuel (not mid-mining-pass -- dom-main/
+-- mining/vertical.lua's own tryHomeLink() already covers that case, as
+-- part of a full unload cycle) can serve itself right where it's
+-- standing instead of waiting on a rescuer turtle or a trip to a real
+-- chest. Same operator policy as everywhere else in this file: a chest
+-- confirmed still present is always worth trying, and M.pickUp() itself
+-- already guarantees the record resolves correctly (retriable "placed"
+-- vs. a genuinely confirmed-gone loss) on any failure here, so this
+-- doesn't need its own separate bookkeeping.
+--
+-- Returns true once fuel reaches targetFuel (or is unlimited) AND the
+-- chest is safely back in inventory; false, reason, reasonCode
+-- otherwise -- reasonCode mirrors tryHomeLink()'s own:
+--   "unavailable" -- no chest to place at all (nothing local to try;
+--     caller should fall back to some other refuel source).
+--   "stuck" -- placed but not retrievable -- operator policy: the
+--     caller must NOT treat this as "nothing happened" and move on;
+--     dom-main/controller/scheduler.lua's own recovery sweep will keep
+--     retrying it independently of whatever this call's caller does next.
+function M.refuelTo(targetFuel)
+  local direction, placeErr = M.place()
+  if not direction then
+    return false, placeErr, "unavailable"
+  end
+  stats.recordEnderChestPlacement()
+
+  if M.isPresent(direction) then
+    fuel.refuelFrom(SUCK_BY_DIRECTION[direction], targetFuel)
+  end
+
+  local ok, pickErr = M.pickUp(direction)
+  if not ok then
+    return false, pickErr, "stuck"
+  end
+
+  local fuelLevel = turtle.getFuelLevel()
+  if fuelLevel == "unlimited" or fuelLevel >= targetFuel then return true end
+  return false, "picked the chest back up but still short of " .. targetFuel
+    .. " fuel (has " .. tostring(fuelLevel) .. ") -- it may simply be out of fuel to give right now"
 end
 
 _G.__HOMELINK_MODULE = M
