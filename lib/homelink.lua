@@ -393,7 +393,7 @@ end
 -- and a genuine failure to reappear as itself ANYWHERE is reported
 -- clearly rather than let the caller carry on with the wrong item
 -- sitting in M.SLOT, believing it still has its home-link chest.
-function M.pickUp(direction)
+local function attemptPickUp(direction)
   local dig = turtle.dig
   if direction == "up" then dig = turtle.digUp
   elseif direction == "down" then dig = turtle.digDown end
@@ -555,6 +555,34 @@ function M.pickUp(direction)
   return false, "dug the home-link chest but it never reappeared in inventory, even after a floor-pickup retry -- may be lost"
 end
 
+-- Thin wrapper around attemptPickUp() above: guarantees the recorded
+-- "placed" state gets resolved (to "pickup_failed") on ANY failure, even
+-- one attemptPickUp() itself doesn't explicitly markPickup() for.
+--
+-- Confirmed live, twice: several of attemptPickUp()'s own early-return
+-- branches (a plain dig() failure, "slot 16 blocked and no spare slot")
+-- never called markPickup() at all -- and dom-main/mining/vertical.lua's
+-- tryHomeLink() calls this DIRECTLY (not through M.recover(), which
+-- previously had its own separate catch-all wrapped around its OWN call
+-- to this function) -- so a turtle's very FIRST pickup attempt, right
+-- after placing, could fail via one of those branches and leave the
+-- record stuck "placed" under its original timestamp with nothing ever
+-- correcting it, regardless of M.recover()'s own safety net. Patching
+-- every individual branch is exactly the kind of thing that's easy to
+-- get wrong again the next time one gets added -- a single wrapper here
+-- covers all of them, present and future, for every caller, without
+-- needing to remember to call markPickup() at each new return point.
+function M.pickUp(direction)
+  local ok, err = attemptPickUp(direction)
+  if not ok then
+    local stillPlaced = loadState()
+    if stillPlaced and stillPlaced.status == "placed" then
+      markPickup("pickup_failed", err)
+    end
+  end
+  return ok, err
+end
+
 function M.recover()
   local inventoryOk, inventoryInfo = M.normalizeInventory()
   if inventoryOk then
@@ -602,23 +630,11 @@ function M.recover()
     return false, reason
   end
 
+  -- M.pickUp() itself now guarantees the record gets resolved to
+  -- "pickup_failed" on any failure (see its own comment) -- no separate
+  -- catch-all needed here anymore.
   local picked, pickInfo = M.pickUp(saved.direction)
-  if not picked then
-    -- Catch-all, not a duplicate of M.pickUp()'s own markPickup() calls
-    -- -- several of ITS failure branches (e.g. dig() itself failing)
-    -- never call markPickup() at all, confirmed live: status stayed
-    -- "placed" under its ORIGINAL timestamp through repeated failed
-    -- recovery attempts, which made dom-main/controller/scheduler.lua's
-    -- checks re-trigger recovery every single tick instead of ever
-    -- backing off. Only touches the record if it's still literally
-    -- "placed" -- a branch that already called markPickup() left it as
-    -- something else, so this is a no-op there.
-    local stillPlaced = loadState()
-    if stillPlaced and stillPlaced.status == "placed" then
-      markPickup("pickup_failed", pickInfo)
-    end
-    return false, pickInfo
-  end
+  if not picked then return false, pickInfo end
   return true, pickInfo or "recovered placed home-link chest"
 end
 
