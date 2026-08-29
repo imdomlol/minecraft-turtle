@@ -44,8 +44,7 @@
 if _G.__FLEET_MODULE then return _G.__FLEET_MODULE end
 
 local exec = dofile("/lib/exec.lua")
-
-local unpack = table.unpack or unpack
+local tasks = dofile("/lib/tasks.lua")
 
 local PROTOCOL           = "turtle-fleet-v1"
 local MODEM_SIDE         = "left"  -- ender modem is always equipped here, per hardware convention
@@ -160,65 +159,6 @@ local function listenLoop(ident, controllerId, startExec)
   end
 end
 
-local function runTasks(buildInitialTasks)
-  local tasks = {}
-
-  local function removeDead()
-    local kept = {}
-    for _, task in ipairs(tasks) do
-      if coroutine.status(task.co) ~= "dead" then kept[#kept + 1] = task end
-    end
-    tasks = kept
-  end
-
-  local function addTask(fn, onError)
-    local task = { co = coroutine.create(fn), filter = nil, onError = onError }
-    tasks[#tasks + 1] = task
-    local ok, filter = coroutine.resume(task.co)
-    if not ok then
-      if task.onError then task.onError(filter) else error(filter, 0) end
-    else
-      task.filter = filter
-    end
-    removeDead()
-  end
-
-  local function startExecTask(message)
-    addTask(function()
-      local ok, output = exec.run(message.command)
-      rednet.send(controllerId, {
-        type = "result", cmd_id = message.cmd_id, ok = ok, output = output,
-      }, PROTOCOL)
-    end, function(err)
-      rednet.send(controllerId, {
-        type = "result",
-        cmd_id = message.cmd_id,
-        ok = false,
-        output = "error: " .. tostring(err),
-      }, PROTOCOL)
-    end)
-  end
-
-  for _, fn in ipairs(buildInitialTasks(startExecTask)) do addTask(fn) end
-
-  while #tasks > 0 do
-    local event = { os.pullEvent() }
-    local taskCount = #tasks
-    for i = 1, taskCount do
-      local task = tasks[i]
-      if task and (task.filter == nil or task.filter == event[1]) then
-        local ok, filter = coroutine.resume(task.co, unpack(event))
-        if not ok then
-          if task.onError then task.onError(filter) else error(filter, 0) end
-        else
-          task.filter = filter
-        end
-      end
-    end
-    removeDead()
-  end
-end
-
 -- Sends a status heartbeat every HEARTBEAT_INTERVAL seconds -- doubles as
 -- registration on the first send, since the controller has no separate
 -- "register" message to wait for.
@@ -306,13 +246,27 @@ function M.run()
 
   term.redirect(exec.wrapTerm(term.current()))
 
-  runTasks(function(startExecTask)
-    return {
-      function() listenLoop(ident, controllerId, startExecTask) end,
-      function() heartbeatLoop(ident, controllerId) end,
-      function() logLoop(ident, controllerId) end,
-    }
-  end)
+  local sched = tasks.new()
+  local function startExecTask(message)
+    sched.addTask(function()
+      local ok, output = exec.run(message.command)
+      rednet.send(controllerId, {
+        type = "result", cmd_id = message.cmd_id, ok = ok, output = output,
+      }, PROTOCOL)
+    end, function(err)
+      rednet.send(controllerId, {
+        type = "result",
+        cmd_id = message.cmd_id,
+        ok = false,
+        output = "error: " .. tostring(err),
+      }, PROTOCOL)
+    end)
+  end
+
+  sched.addTask(function() listenLoop(ident, controllerId, startExecTask) end)
+  sched.addTask(function() heartbeatLoop(ident, controllerId) end)
+  sched.addTask(function() logLoop(ident, controllerId) end)
+  sched.run()
 end
 
 _G.__FLEET_MODULE = M

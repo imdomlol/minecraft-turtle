@@ -33,6 +33,7 @@ dom-main/controller/gpshost.lua
 
 # --- shared libraries ---------------------------------------------------
 lib/exec.lua
+lib/tasks.lua
 lib/worldmap.lua
 lib/updater.lua
 lib/fuel.lua

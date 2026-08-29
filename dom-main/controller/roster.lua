@@ -32,6 +32,11 @@ local PROTOCOL = dofile("/lib/fleet.lua").PROTOCOL
 
 local DEFAULT_TIMEOUT = 60 -- seconds to wait for a proxied command's result
 
+-- table.unpack (Lua 5.2+/CC:Tweaked) vs the global unpack (Lua 5.1) --
+-- see M.proxyAll()'s own use, same reasoning as dom-main/controller/
+-- scheduler.lua's identical local.
+local unpack = table.unpack or unpack
+
 local M = {}
 
 local STATE_PATH = "/state/roster.state"
@@ -40,12 +45,48 @@ local roster = {}        -- name -> { computerId, label, fuel, position, job, la
 local cmdCounter = 0
 local collisionCounter = 0
 local RECONNECT_GAP_MS = 15000
+local FLUSH_INTERVAL = 5 -- seconds between persisted-state writes, see M.run()
+
+-- Set by every upsert() (i.e. every single heartbeat), cleared by
+-- M.flush() -- mirrors dom-main/controller/worldstore.lua's own
+-- dirty-chunk/M.flush() pattern exactly, for the identical reason: a
+-- full serializeJSON + disk write of the WHOLE roster on every single
+-- heartbeat doesn't scale past a handful of turtles (confirmed live --
+-- this was a full-table write on literally every ~3s heartbeat from
+-- every turtle, hundreds of times a second at a few-hundred-turtle
+-- fleet size). save() below still does the real write; M.flush() just
+-- decides WHEN, and M.run() calls that on a fixed cadence instead of
+-- synchronously inline with every heartbeat.
+local dirty = false
 
 local function save()
   if not fs.exists("/state") then fs.makeDir("/state") end
   local f = fs.open(STATE_PATH, "w")
   f.write(textutils.serializeJSON(roster))
   f.close()
+end
+
+-- Persists the roster to disk if anything's changed since the last
+-- flush -- a no-op otherwise. Exposed (not local) so a caller that needs
+-- an immediate, synchronous write (none currently do, but M.run() below
+-- calls it on its own timer either way) isn't forced to wait out
+-- FLUSH_INTERVAL.
+function M.flush()
+  if not dirty then return end
+  save()
+  dirty = false
+end
+
+-- Blocks forever, flushing the roster to disk every FLUSH_INTERVAL
+-- seconds (only an actual write when M.flush() finds something dirty).
+-- Meant to run as its own dom-main/controller/controller_main.lua
+-- parallel.waitForAny branch, same shape as dom-main/controller/
+-- block_sync.lua's own M.run() driving worldstore.lua's M.flush().
+function M.run()
+  while true do
+    sleep(FLUSH_INTERVAL)
+    M.flush()
+  end
 end
 
 -- Every turtle this controller has EVER heard from, not just this boot
@@ -126,7 +167,7 @@ local function upsert(senderId, message)
     -- than needing to wait out some arbitrary initial delay.
     lastBlockPull = existing and existing.lastBlockPull or now,
   }
-  save()
+  dirty = true
 
   -- Piggybacked on every heartbeat rather than a separate round trip --
   -- see lib/updater.lua (turtle-side) for what it does with this.
@@ -299,6 +340,23 @@ function M.leastRecentlyPulled()
   return bestName
 end
 
+-- The `count` turtles with the oldest lastBlockPull, oldest first -- for
+-- dom-main/controller/block_sync.lua to pull from several at once
+-- (concurrently) instead of just M.leastRecentlyPulled()'s single name
+-- per cycle, which round-robins a several-hundred-turtle roster too
+-- slowly for any one turtle's data to stay reasonably fresh (see that
+-- file's own header comment, which already flagged this as a concern
+-- before real fleet size ever confirmed it). May return fewer than
+-- `count` names if the roster itself is smaller.
+function M.leastRecentlyPulledBatch(count)
+  local names = {}
+  for name in pairs(roster) do names[#names + 1] = name end
+  table.sort(names, function(a, b) return roster[a].lastBlockPull < roster[b].lastBlockPull end)
+  local out = {}
+  for i = 1, math.min(count, #names) do out[i] = names[i] end
+  return out
+end
+
 function M.markBlockPull(name, timestamp)
   local entry = roster[name]
   if entry then entry.lastBlockPull = timestamp end
@@ -338,15 +396,33 @@ function M.pullBlocks(name, maxEntries, timeoutSeconds)
   end
 end
 
--- Runs `command` on every turtle currently in the roster, sequentially
--- (one proxy() at a time, so a slow/unreachable turtle only costs its
--- own timeout, not the others' turn) -- for server/turtlectl.py's
--- `send-fleet`. Returns { [name] = { ok, output } } for every turtle
--- attempted.
+-- Concurrent M.proxy() calls at once inside M.proxyAll() below -- a
+-- safety valve against firing an unbounded rednet burst at a
+-- few-hundred-turtle fleet size, not load-bearing logic. Batches run one
+-- after another, but every turtle WITHIN a batch is dispatched at the
+-- same time, so total cost stays close to O(timeout), not O(fleet size
+-- x timeout) -- see M.proxyAll()'s own comment for why that distinction
+-- is the entire point.
+local PROXY_ALL_BATCH_SIZE = 50
+
+-- Runs `command` on every turtle currently in the roster, CONCURRENTLY
+-- (every turtle in a batch dispatched via M.proxy() at once, not one
+-- after another) -- for server/turtlectl.py's `send-fleet`. Returns
+-- { [name] = { ok, output } } for every turtle attempted.
 --
--- Snapshots the names to a plain array before looping: M.proxy() can add
--- a brand-new roster entry mid-wait (a turtle heartbeating for the first
--- time while we're blocked on a different one's reply, via
+-- Used to be strictly sequential; confirmed live at just 6 turtles that
+-- this makes a fleet-wide command (an operator's os.reboot(), most
+-- visibly -- a rebooting turtle never replies, so every one of them
+-- burns its own full `timeoutSeconds`) cost roughly
+-- (fleet size) x timeoutSeconds instead of ~timeoutSeconds regardless of
+-- fleet size -- unworkable well before reaching the hundreds of turtles
+-- this fleet is meant to scale to (a 300-turtle reboot would have taken
+-- ~5 hours sequentially; concurrently it's bounded by PROXY_ALL_BATCH_SIZE
+-- and one timeout).
+--
+-- Snapshots the names to a plain array before dispatching: M.proxy() can
+-- add a brand-new roster entry mid-wait (a turtle heartbeating for the
+-- first time while we're blocked on a different one's reply, via
 -- handleMessage()'s upsert()) -- mutating `roster` while pairs() is
 -- iterating it directly would be undefined behavior.
 function M.proxyAll(command, timeoutSeconds)
@@ -354,9 +430,16 @@ function M.proxyAll(command, timeoutSeconds)
   for name in pairs(roster) do names[#names + 1] = name end
 
   local out = {}
-  for _, name in ipairs(names) do
-    local ok, output = M.proxy(name, command, timeoutSeconds)
-    out[name] = { ok = ok, output = output }
+  for batchStart = 1, #names, PROXY_ALL_BATCH_SIZE do
+    local batchTasks = {}
+    for i = batchStart, math.min(batchStart + PROXY_ALL_BATCH_SIZE - 1, #names) do
+      local name = names[i]
+      batchTasks[#batchTasks + 1] = function()
+        local ok, output = M.proxy(name, command, timeoutSeconds)
+        out[name] = { ok = ok, output = output }
+      end
+    end
+    parallel.waitForAll(unpack(batchTasks))
   end
   return out
 end

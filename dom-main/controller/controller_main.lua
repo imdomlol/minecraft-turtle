@@ -20,7 +20,10 @@
   dom-main/controller/gpshost.lua, which lets this controller double as
   one of the (at least 4, non-coplanar) real-world anchor points
   CC:Tweaked's own gps.locate() needs, once configured via
-  server/turtlectl.py's `gpshost` shortcut.
+  server/turtlectl.py's `gpshost` shortcut, and dom-main/controller/
+  roster.lua's own M.run(), which periodically flushes the roster to
+  disk (see that function's own comment for why this isn't done inline
+  on every single heartbeat).
 ------------------------------------------------------------------------]]
 
 local remote = dofile("/lib/remote.lua")
@@ -29,5 +32,6 @@ local blockSync = dofile("/dom-main/controller/block_sync.lua")
 local scheduler = dofile("/dom-main/controller/scheduler.lua")
 local router = dofile("/dom-main/controller/router.lua")
 local gpshost = dofile("/dom-main/controller/gpshost.lua")
+local roster = dofile("/dom-main/controller/roster.lua")
 
-parallel.waitForAny(remote.run, fleetListener.run, blockSync.run, scheduler.run, router.run, gpshost.run)
+parallel.waitForAny(remote.run, fleetListener.run, blockSync.run, scheduler.run, router.run, gpshost.run, roster.run)

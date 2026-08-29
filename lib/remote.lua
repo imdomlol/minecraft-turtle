@@ -14,6 +14,7 @@
 ------------------------------------------------------------------------]]
 
 local exec = dofile("/lib/exec.lua")
+local tasks = dofile("/lib/tasks.lua")
 
 local CONFIG_PATH   = "/state/remote.cfg"
 local POLL_INTERVAL = 3    -- seconds between polls when idle
@@ -73,7 +74,18 @@ local function post(cfg, path, body)
   return decoded
 end
 
-local function pollLoop(cfg, id)
+-- Polls for the next queued command and hands it to `startExecTask` as
+-- its own concurrent task, rather than running it inline -- confirmed
+-- live: a single slow command (e.g. a fleet-wide dispatch that itself
+-- waits on dozens/hundreds of unreachable turtles) used to block this
+-- loop from ever polling again until it finished, so every OTHER queued
+-- operator command -- even a plain status query -- sat frozen behind it
+-- for however long that one took. Polling now never waits on a
+-- command's own execution, so an unrelated command queued moments later
+-- runs immediately instead of queueing behind it. Same shape as
+-- lib/fleet.lua's listenLoop/startExecTask -- see lib/tasks.lua's own
+-- header for why the scheduler itself is shared between the two.
+local function pollLoop(cfg, id, startExecTask)
   local lastErr = nil
 
   while true do
@@ -90,14 +102,7 @@ local function pollLoop(cfg, id)
     end
 
     if resp and resp.command then
-      local ok, output = exec.run(resp.command)
-      post(cfg, "/result", {
-        id = id,
-        cmd_id = resp.cmd_id,
-        command = resp.command,
-        ok = ok,
-        output = output,
-      })
+      startExecTask(resp)
       -- loop again immediately in case more commands are queued
     else
       sleep(err and ERROR_BACKOFF or POLL_INTERVAL)
@@ -163,11 +168,25 @@ function M.run()
 
   term.redirect(exec.wrapTerm(term.current()))
 
-  parallel.waitForAny(
-    function() pollLoop(cfg, id) end,
-    function() streamLoop(cfg, id) end,
-    function() blockStreamLoop(cfg, id) end
-  )
+  local sched = tasks.new()
+  local function startExecTask(resp)
+    sched.addTask(function()
+      local ok, output = exec.run(resp.command)
+      post(cfg, "/result", {
+        id = id, cmd_id = resp.cmd_id, command = resp.command, ok = ok, output = output,
+      })
+    end, function(err)
+      post(cfg, "/result", {
+        id = id, cmd_id = resp.cmd_id, command = resp.command,
+        ok = false, output = "error: " .. tostring(err),
+      })
+    end)
+  end
+
+  sched.addTask(function() pollLoop(cfg, id, startExecTask) end)
+  sched.addTask(function() streamLoop(cfg, id) end)
+  sched.addTask(function() blockStreamLoop(cfg, id) end)
+  sched.run()
 end
 
 return M
