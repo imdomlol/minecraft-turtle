@@ -18,7 +18,16 @@
       like any other CraftOS coroutine). `onError`, if given, is called
       with the error message instead of propagating it if `fn` errors;
       omit to let a task's error take down the whole scheduler (matches
-      parallel.waitForAll's own default behavior).
+      parallel.waitForAll's own default behavior). `onError` itself is
+      run through pcall -- confirmed live: an `onError` that ALSO throws
+      (e.g. because it tries the same network call that just failed,
+      which fails the exact same way) used to propagate uncaught and take
+      the entire scheduler down, which -- since this scheduler is meant
+      to run forever alongside sibling parallel.waitForAny branches (see
+      lib/remote.lua/lib/fleet.lua) -- silently killed the whole
+      controller until someone noticed it had gone completely
+      unreachable. A second failure inside `onError` is now just printed
+      and swallowed instead.
     sched.run() -- blocks forever (or until every task has finished AND
       no more are added -- see below), dispatching each os.pullEvent()
       to whichever tasks are currently waiting on that event type.
@@ -47,12 +56,29 @@ function M.new()
     tasks = kept
   end
 
+  -- Never lets a task's failure (or its onError handler's OWN failure --
+  -- see this file's header comment) take the whole scheduler down
+  -- silently: with no onError, the error is printed and swallowed rather
+  -- than propagated, since a scheduler meant to run forever alongside
+  -- sibling parallel.waitForAny branches taking the whole program down
+  -- over one task's bug is worse than that one task just dying.
+  local function handleTaskError(task, err)
+    if not task.onError then
+      print("tasks: unhandled task error: " .. tostring(err))
+      return
+    end
+    local ok, err2 = pcall(task.onError, err)
+    if not ok then
+      print("tasks: task's own onError handler also failed: " .. tostring(err2))
+    end
+  end
+
   function sched.addTask(fn, onError)
     local task = { co = coroutine.create(fn), filter = nil, onError = onError }
     tasks[#tasks + 1] = task
     local ok, filter = coroutine.resume(task.co)
     if not ok then
-      if task.onError then task.onError(filter) else error(filter, 0) end
+      handleTaskError(task, filter)
     else
       task.filter = filter
     end
@@ -72,7 +98,7 @@ function M.new()
         if task and (task.filter == nil or task.filter == event[1]) then
           local ok, filter = coroutine.resume(task.co, unpack(event))
           if not ok then
-            if task.onError then task.onError(filter) else error(filter, 0) end
+            handleTaskError(task, filter)
           else
             task.filter = filter
           end

@@ -61,17 +61,45 @@ local function headers(cfg)
   }
 end
 
+-- Confirmed live: once commands started running as concurrent tasks (see
+-- pollLoop below), overlapping http.post() calls crashed with "attempt
+-- to use a closed file" -- CC:Tweaked's http API doesn't appear to
+-- tolerate more than one truly-in-flight request from the same computer
+-- safely. Serializing just the actual network call (not command
+-- execution -- see pollLoop's own comment for why that distinction is
+-- the whole point) sidesteps it: every post() call queues here, one at a
+-- time, while whatever's slow about a command itself (lib/exec.lua's
+-- exec.run(), which is what tonight's fleet-wide-dispatch stall was
+-- actually about) still runs fully concurrently.
+local httpLocked = false
+local function acquireHttpLock()
+  while httpLocked do
+    os.pullEvent("remote_http_unlock")
+  end
+  httpLocked = true
+end
+local function releaseHttpLock()
+  httpLocked = false
+  os.queueEvent("remote_http_unlock")
+end
+
 -- Returns decoded response, or nil + reason.
 local function post(cfg, path, body)
-  local handle, err = http.post(cfg.url .. path, textutils.serializeJSON(body), headers(cfg))
-  if not handle then return nil, tostring(err) end
-  local code = handle.getResponseCode()
-  local respBody = handle.readAll()
-  handle.close()
-  if code ~= 200 then return nil, "HTTP " .. tostring(code) end
-  local ok, decoded = pcall(textutils.unserializeJSON, respBody)
-  if not ok then return nil, "bad response json" end
-  return decoded
+  acquireHttpLock()
+  local ok, result, err = pcall(function()
+    local handle, herr = http.post(cfg.url .. path, textutils.serializeJSON(body), headers(cfg))
+    if not handle then return nil, tostring(herr) end
+    local code = handle.getResponseCode()
+    local respBody = handle.readAll()
+    handle.close()
+    if code ~= 200 then return nil, "HTTP " .. tostring(code) end
+    local decodeOk, decoded = pcall(textutils.unserializeJSON, respBody)
+    if not decodeOk then return nil, "bad response json" end
+    return decoded
+  end)
+  releaseHttpLock()
+  if not ok then error(result, 0) end
+  return result, err
 end
 
 -- Polls for the next queued command and hands it to `startExecTask` as
