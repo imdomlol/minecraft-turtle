@@ -102,10 +102,31 @@ end
 -- meant to be called by a job function itself (see
 -- dom-main/mining/vertical.lua for the pattern), not from outside.
 -- `data` is whatever shape that job wants back on resume.
+-- Confirmed live: a shared table reference reaching this call's own
+-- argument tree (current.params and `data` both embedded together --
+-- dom-main/mining/vertical.lua's own resume-checkpoint-aliasing bug is
+-- the one specific case already fixed at its source, but this is a
+-- general job-checkpointing utility with no way to guarantee every
+-- caller's payload is always alias-free) crashes with "Cannot serialize
+-- table with repeated entries" -- uncaught, since nothing here catches
+-- it, which crashes the ENTIRE running job (only job.run()'s outer
+-- pcall stops it there, discarding whatever progress hadn't already
+-- been checkpointed). A checkpoint failing to save is a turtle that
+-- resumes from scratch next time instead of exactly where it left off
+-- -- mildly wasteful. A checkpoint call crashing the otherwise-healthy
+-- job trying to make it is much worse, and never something the CALLER
+-- (deep inside a mining pass, not expecting to need its own error
+-- handling around a routine progress-save) should have to guard
+-- against itself.
 function M.checkpoint(data)
+  local ok, encoded = pcall(textutils.serializeJSON, { name = current.name, params = current.params, checkpoint = data })
+  if not ok then
+    print("job: could not save checkpoint -- " .. tostring(encoded))
+    return
+  end
   if not fs.exists("/state") then fs.makeDir("/state") end
   local f = fs.open(CHECKPOINT_PATH, "w")
-  f.write(textutils.serializeJSON({ name = current.name, params = current.params, checkpoint = data }))
+  f.write(encoded)
   f.close()
 end
 

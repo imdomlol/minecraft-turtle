@@ -203,10 +203,22 @@ function M.normalizeInventory()
   return M.moveToReserved(slot)
 end
 
+-- pcall-guarded for the same reason lib/job.lua's M.checkpoint() now is
+-- (see that function's own comment): this runs on every place()/
+-- markPickup() call, right in the middle of a normal mining pass -- a
+-- serialization failure here must degrade to "this update didn't get
+-- persisted" (still visible via M.getState() next time it DOES
+-- succeed), never crash the whole job over what's fundamentally a
+-- bookkeeping write.
 local function saveState(data)
+  local ok, encoded = pcall(textutils.serializeJSON, data)
+  if not ok then
+    print("homelink: could not save state -- " .. tostring(encoded))
+    return
+  end
   if not fs.exists("/state") then fs.makeDir("/state") end
   local f = fs.open(STATE_PATH, "w")
-  f.write(textutils.serializeJSON(data))
+  f.write(encoded)
   f.close()
 end
 

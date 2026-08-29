@@ -59,10 +59,24 @@ local FLUSH_INTERVAL = 5 -- seconds between persisted-state writes, see M.run()
 -- synchronously inline with every heartbeat.
 local dirty = false
 
+-- pcall-guarded like lib/job.lua's M.checkpoint()/lib/homelink.lua's
+-- saveState() (see those for the fuller reasoning) -- this now runs
+-- from M.run()'s own periodic flush loop, one of controller_main.lua's
+-- parallel.waitForAny branches, so an uncaught error here wouldn't just
+-- fail to persist the roster -- confirmed live tonight (a different
+-- unprotected serialize call, in lib/remote.lua) that an uncaught error
+-- in ANY one of those branches takes down every sibling branch with it,
+-- including fleet_listener -- the whole controller goes unreachable
+-- over one bad write.
 local function save()
+  local ok, encoded = pcall(textutils.serializeJSON, roster)
+  if not ok then
+    print("roster: could not save state -- " .. tostring(encoded))
+    return
+  end
   if not fs.exists("/state") then fs.makeDir("/state") end
   local f = fs.open(STATE_PATH, "w")
-  f.write(textutils.serializeJSON(roster))
+  f.write(encoded)
   f.close()
 end
 
