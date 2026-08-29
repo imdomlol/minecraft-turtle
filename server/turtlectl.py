@@ -1468,6 +1468,48 @@ def main():
                     return template.format(turtle=turtle)
             return None
 
+        # dom-main/controller/scheduler.lua's own periodic per-turtle
+        # home-link health probe (homeLinkPlacedAge(), run every ~30s
+        # against every turtle, plus once per idle-dispatch) -- a raw
+        # fs.open("/state/homelink.state") read whose result is either
+        # "none" (no stuck chest -- the overwhelmingly common case) or
+        # "placed:<ms>" (stuck for that long). Neither the raw command
+        # echo nor the raw "= none"/"= placed:N" result means anything to
+        # an operator on sight, so this always replaces both with one
+        # captioned line once the result arrives -- and under --silent,
+        # the "none" case is dropped entirely (routine, checked
+        # constantly, exactly the kind of noise --silent exists to hide)
+        # while a genuine "placed:N" is never dropped, silent or not --
+        # this is one of the very few signals that's actually worth
+        # seeing unprompted.
+        HOMELINK_CHECK_MARKER = 'fs.open("/state/homelink.state"'
+        HOMELINK_CHECK_RESULT_RE = re.compile(r"^= (?:placed:(\d+)|none)$")
+        pending_homelink_check = set()  # senders whose last echo was this probe, awaiting its result
+
+        def handle_homelink_check(sender, content):
+            """Returns True if `content` was consumed as part of the
+            home-link health probe (echo or result) -- emit() should do
+            nothing further with it either way."""
+            if content.startswith("> ") and HOMELINK_CHECK_MARKER in content:
+                if sender is not None:
+                    pending_homelink_check.add(sender)
+                return True
+            if sender in pending_homelink_check:
+                m = HOMELINK_CHECK_RESULT_RE.match(content)
+                if m:
+                    pending_homelink_check.discard(sender)
+                    if m.group(1):
+                        age_s = int(m.group(1)) // 1000
+                        sys.stdout.write(f"[{sender}] home-link check: chest stuck \"placed\" for {age_s}s\n")
+                    elif not args.silent:
+                        sys.stdout.write(f"[{sender}] home-link check: OK, no stuck chest\n")
+                    return True
+                # Something else's result landed before this probe's own
+                # -- stop waiting for it rather than risk misattributing
+                # an unrelated line to it later.
+                pending_homelink_check.discard(sender)
+            return False
+
         def is_noisy_content(content):
             if content.startswith("vertical: spotted "):
                 return True
@@ -1485,6 +1527,8 @@ def main():
 
         def emit(sender, content):
             if content in BOOKKEEPING_ECHOES:
+                return
+            if handle_homelink_check(sender, content):
                 return
             if args.silent and content.startswith("> "):
                 # A bare (no sender) echo is always this console's own
