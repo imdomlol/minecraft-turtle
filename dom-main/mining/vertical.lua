@@ -487,55 +487,72 @@ local MAX_CHESTS_PER_UNLOAD = 20
 -- direction (this turtle placed it itself, one line above).
 local SUCK_BY_DIRECTION = { front = turtle.suck, up = turtle.suckUp, down = turtle.suckDown }
 
+-- How many refuel/deposit cycles to retry while the chest stays
+-- confirmed present (homelink.isPresent()) -- operator policy: a
+-- refuel/deposit hiccup (chest temporarily out of fuel stock, chest
+-- temporarily full/blocked) is NEVER on its own a reason to give up on
+-- a chest that's still right there; only stop retrying once there's
+-- nothing left to deposit, or the chest itself is gone.
+local HOME_LINK_TRANSFER_ATTEMPTS = 5
+
 -- Tries the shared home-link Ender Chest (see lib/homelink.lua) before
 -- ever falling back to the travel-based chestfinder search below. A
 -- turtle carrying one can unload AND refuel without leaving wherever it
--- currently is -- place it in whichever direction is open, drop
--- everything in, top off fuel as far as the chest currently has stock
--- for (best-effort: running the chest's coal supply dry is the chest's
--- problem, not a reason to fail this), then pick it back up. Returns
--- true only once the chest is confirmed safely back in inventory; false,
--- reason for anything else (no chest in slot 16 yet, nowhere open to
--- place it, or -- rare and serious -- it never reappeared after being
--- dug back up), which the caller falls back on rather than treating as
--- fatal on its own -- the old chestfinder path still works regardless of
--- whether this turtle has been given a home-link chest at all.
+-- currently is -- place it in whichever direction is open, retry
+-- refuel+deposit against it (see HOME_LINK_TRANSFER_ATTEMPTS above)
+-- while it's confirmed still there, then pick it back up. Returns true
+-- only once the chest is confirmed safely back in inventory; otherwise
+-- false, reason, and a THIRD value the caller uses to decide what "not
+-- true" actually means:
+--   "unavailable" -- no chest to place at all (none in slot 16 or
+--     anywhere else in inventory) -- nothing local to try, the
+--     chestfinder fallback below is the right (and only) move.
+--   "stuck" -- a chest WAS placed but couldn't be picked back up --
+--     operator policy: the caller must NOT silently fall back to
+--     surface storage as though nothing happened here; see
+--     unloadIfFull()'s own handling of this.
 local function tryHomeLink()
   local direction, placeErr = homelink.place()
   if not direction then
-    return false, placeErr
+    return false, placeErr, "unavailable"
   end
 
-  -- Refuel BEFORE dropping loot, not after -- confirmed live: doing it
-  -- the other way round meant turtle.suck() (which always grabs
-  -- whichever slot the target inventory happens to expose first, never
-  -- a specific item) spent its attempts pulling the turtle's OWN just-
-  -- dropped cargo back out of the shared chest, since that now occupied
-  -- the chest's earliest slots -- never reaching the actual coal
-  -- however deep in the chest's own slot order it happened to be. Fuel
-  -- first means M.refuelFrom() only ever sees whatever the chest
-  -- already had (ideally just AE2-stocked coal) before this turtle
-  -- adds anything of its own to it.
-  homelink.blackboxInspect("transfer.inspect_expected_block_before_refuel", direction)
-  homelink.blackboxSlot("transfer.slot16_before_refuel", homelink.SLOT)
-  local fuelBefore = turtle.getFuelLevel()
-  local refueled = fuel.refuelFrom(SUCK_BY_DIRECTION[direction], fuel.maxFuel())
-  homelink.blackbox("transfer.refuel_from_home_link", {
-    ok = refueled == true,
-    fuelBefore = fuelBefore,
-    fuelAfter = turtle.getFuelLevel(),
-  })
+  for attempt = 1, HOME_LINK_TRANSFER_ATTEMPTS do
+    if not homelink.isPresent(direction) then break end
 
-  homelink.blackboxInspect("transfer.inspect_expected_block_before_deposit", direction)
-  homelink.blackboxSlot("transfer.slot16_before_deposit", homelink.SLOT)
-  local dropped = inventory.dropAll(direction)
-  homelink.blackbox("transfer.deposit_to_home_link", { emptiedSlots = dropped })
+    -- Refuel BEFORE dropping loot, not after -- confirmed live: doing it
+    -- the other way round meant turtle.suck() (which always grabs
+    -- whichever slot the target inventory happens to expose first, never
+    -- a specific item) spent its attempts pulling the turtle's OWN just-
+    -- dropped cargo back out of the shared chest, since that now occupied
+    -- the chest's earliest slots -- never reaching the actual coal
+    -- however deep in the chest's own slot order it happened to be. Fuel
+    -- first means M.refuelFrom() only ever sees whatever the chest
+    -- already had (ideally just AE2-stocked coal) before this turtle
+    -- adds anything of its own to it.
+    homelink.blackboxInspect("transfer.inspect_expected_block_before_refuel", direction)
+    homelink.blackboxSlot("transfer.slot16_before_refuel", homelink.SLOT)
+    local fuelBefore = turtle.getFuelLevel()
+    local refueled = fuel.refuelFrom(SUCK_BY_DIRECTION[direction], fuel.maxFuel())
+    homelink.blackbox("transfer.refuel_from_home_link", {
+      ok = refueled == true,
+      fuelBefore = fuelBefore,
+      fuelAfter = turtle.getFuelLevel(),
+    })
+
+    homelink.blackboxInspect("transfer.inspect_expected_block_before_deposit", direction)
+    homelink.blackboxSlot("transfer.slot16_before_deposit", homelink.SLOT)
+    local dropped = inventory.dropAll(direction)
+    homelink.blackbox("transfer.deposit_to_home_link", { emptiedSlots = dropped })
+
+    if inventory.isEmpty() then break end
+  end
   homelink.blackboxInspect("transfer.inspect_expected_block_after_deposit", direction)
   homelink.blackboxSlot("transfer.slot16_after_deposit", homelink.SLOT)
 
   local ok, pickErr = homelink.pickUp(direction)
   if not ok then
-    return false, pickErr
+    return false, pickErr, "stuck"
   end
   return true
 end
@@ -547,9 +564,20 @@ local function unloadIfFull(tidy, chestPos)
     return false, "inventory full (tidy disabled)"
   end
 
-  local homeOk, homeErr = tryHomeLink()
+  local homeOk, homeErr, homeReason = tryHomeLink()
   if homeOk then return true end
-  print("vertical: home-link unload/refuel unavailable (" .. tostring(homeErr) .. ") -- falling back to chestfinder")
+  if homeReason == "stuck" then
+    -- Operator policy: a chest confirmed placed but not retrievable is
+    -- a hard failure, not a reason to quietly go unload somewhere else
+    -- as though nothing happened. Stopping here (same shape as the
+    -- "inventory full, no chest found" hard failure below) leaves the
+    -- turtle idle with the chest still recorded "placed" --
+    -- dom-main/controller/scheduler.lua's own recover_home_link sweep
+    -- (M.checkHomeLink()/idle-dispatch) picks it back up from there,
+    -- same mechanism that already recovers a stray chest on its own.
+    return false, "home-link chest stuck, not falling back to surface storage: " .. tostring(homeErr)
+  end
+  print("vertical: home-link unavailable (" .. tostring(homeErr) .. ") -- falling back to chestfinder")
 
   local origin = nav.getPosition()
   print("vertical: inventory full, looking for a chest to unload into")

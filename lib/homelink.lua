@@ -76,11 +76,27 @@ local function hasEnderChest(value)
   return false
 end
 
+-- Confirmed live: a turtle stuck retrying recovery for several minutes
+-- (many M.recover() -> attemptPickUp() calls in a row -- attemptPickUp()
+-- never calls beginBlackbox() itself, only M.place() does, so every
+-- retry just kept appending to the SAME session's events) crashed the
+-- whole job on "Cannot serialize table with repeated entries" -- most
+-- likely CC:Tweaked's serializer choking on however large/deep that had
+-- grown, though the exact trigger wasn't pinned down. Either way, a
+-- LOGGING call being able to crash the job it's merely trying to record
+-- is the real bug: this must never be fatal. pcall here (defense in
+-- depth) plus the size cap below (the likely actual fix) both guard
+-- against it independently.
 local function saveBlackbox()
   if not (blackbox and blackbox.sawEnderChest) then return end
   if not fs.exists("/state") then fs.makeDir("/state") end
+  local ok, encoded = pcall(textutils.serializeJSON, blackbox)
+  if not ok then
+    print("homelink: could not save blackbox -- " .. tostring(encoded))
+    return
+  end
   local f = fs.open(BLACKBOX_PATH, "w")
-  f.write(textutils.serializeJSON(blackbox))
+  f.write(encoded)
   f.close()
 end
 
@@ -93,10 +109,19 @@ local function beginBlackbox(reason)
   }
 end
 
+-- Oldest dropped first once a single blackbox session (see
+-- beginBlackbox()'s own comment on when a fresh one starts) accumulates
+-- this many events -- a long run of retries against the same "placed"
+-- record would otherwise grow this without bound.
+local MAX_BLACKBOX_EVENTS = 200
+
 function M.blackbox(event, data)
   if not blackbox then beginBlackbox("implicit") end
   local entry = { at = now(), event = event, data = data }
   blackbox.events[#blackbox.events + 1] = entry
+  if #blackbox.events > MAX_BLACKBOX_EVENTS then
+    table.remove(blackbox.events, 1)
+  end
   if hasEnderChest(data) then blackbox.sawEnderChest = true end
   saveBlackbox()
 end
@@ -270,6 +295,17 @@ inspectDirection = function(direction)
   if direction == "up" then return turtle.inspectUp() end
   if direction == "down" then return turtle.inspectDown() end
   return turtle.inspect()
+end
+
+-- Whether a chest is actually sitting in `direction` right now -- the
+-- one thing that's allowed to end a retry loop against a placed home-
+-- link chest (see dom-main/mining/vertical.lua's tryHomeLink()):
+-- refuel/deposit/pickup hiccups are all meant to be retried while the
+-- chest is confirmed still there, and only "it's genuinely not where
+-- expected anymore" is a real reason to give up on it.
+function M.isPresent(direction)
+  local found, data = inspectDirection(direction)
+  return found and nav.isChest(data.name)
 end
 
 -- Steps into the space just dug, briefly, and back out. turtle.dig()
@@ -572,12 +608,25 @@ end
 -- get wrong again the next time one gets added -- a single wrapper here
 -- covers all of them, present and future, for every caller, without
 -- needing to remember to call markPickup() at each new return point.
+-- Operator policy: only a chest CONFIRMED gone (attemptPickUp()'s own
+-- "expected chest not present before digging" branch -- the one case
+-- that already explicitly marks "pickup_failed" itself) is ever a
+-- reason to stop retrying. Everything else that can fail here (dig()
+-- itself failing, "slot 16 blocked and no spare slot") only happens
+-- AFTER that same preDig check already confirmed a real chest was
+-- there -- so by construction, reaching this fallback with the record
+-- still "placed" means something WENT WRONG after confirming presence,
+-- not that the chest is gone. Re-stamping "placed" (bumping updatedAt,
+-- same status) rather than a terminal "pickup_failed" keeps
+-- dom-main/controller/scheduler.lua's automated recovery retrying
+-- instead of giving up after one hiccup -- a turtle mid-recovery should
+-- stay in recovery, not silently move on as though nothing happened.
 function M.pickUp(direction)
   local ok, err = attemptPickUp(direction)
   if not ok then
     local stillPlaced = loadState()
     if stillPlaced and stillPlaced.status == "placed" then
-      markPickup("pickup_failed", err)
+      markPickup("placed", err)
     end
   end
   return ok, err
@@ -613,18 +662,23 @@ function M.recover()
     -- markPickup() here too (unlike before) -- otherwise this stays
     -- "placed" forever with its original timestamp even though the
     -- attempt is over, and M.checkHomeLink() just keeps re-triggering
-    -- the exact same doomed attempt every sweep. Recorded as
-    -- "pickup_failed" (same status M.pickUp()'s own failure branches
-    -- use), not silently dropped -- still visible via M.getState() for
-    -- an operator to actually go check on.
+    -- the exact same doomed attempt every sweep. Re-stamped "placed"
+    -- (bumping updatedAt), NOT a terminal "pickup_failed" -- failing to
+    -- REACH the recorded position (a blocked path, a fuel hiccup, a bad
+    -- route) doesn't confirm the chest itself is gone, and operator
+    -- policy is only to give up on a chest that's actually confirmed
+    -- absent. Still visible via M.getState() for an operator to check
+    -- on either way.
     local reason = "could not reach recorded home-link chest position: " .. tostring(reachInfo and reachInfo.reason)
-    markPickup("pickup_failed", reason)
+    markPickup("placed", reason)
     return false, reason
   end
   nav.face(target.heading or target.facing)
 
   local found, data = inspectDirection(saved.direction)
   if not (found and nav.isChest(data.name)) then
+    -- This IS the confirmed-gone case -- operator policy: only reason to
+    -- ever stop retrying and treat the local chest as abandoned.
     local reason = "recorded home-link chest is no longer present at the saved position"
     markPickup("pickup_failed", reason)
     return false, reason
