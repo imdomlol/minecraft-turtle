@@ -33,6 +33,8 @@ Usage:
   turtlectl.py roster <controller>    -- every turtle this controller currently knows about
   turtlectl.py worldblock <controller> <x> <y> <z>  -- block recorded at that coordinate, or None
   turtlectl.py whoami <controller> [turtle]  -- basic info about the controller, or a turtle if named
+  turtlectl.py ping <controller> [turtle]  -- ping the controller, or a turtle through it
+                         -- prints last-seen information first when available
   turtlectl.py mode <controller> [idle|passive|aggressive]  -- get or set the autopilot mode
   turtlectl.py ignore <controller> <turtle>  -- stop autopilot from sending that turtle commands
   turtlectl.py unignore <controller> <turtle>  -- allow autopilot commands again
@@ -194,6 +196,112 @@ def queue(url, args, description, command):
         else:
             print(f"(no result after {args.wait_timeout}s -- it may still be running; "
                   f"check with `results {args.controller}` or `console {args.controller}`)")
+
+
+def format_last_seen(name, info):
+    if not info:
+        return f"{name}: last seen unavailable"
+    seconds = info.get("seconds_ago")
+    if seconds is None:
+        seconds = info.get("secondsAgo")
+    if seconds is None:
+        text = f"{name}: last seen unavailable"
+    else:
+        text = f"{name}: last seen {seconds}s ago"
+    details = []
+    label = info.get("label")
+    if label:
+        details.append(f"label={label}")
+    if info.get("pending") is not None:
+        details.append(f"pending={info['pending']}")
+    if details:
+        text += f" ({', '.join(details)})"
+    return text
+
+
+def print_controller_last_seen(url, args):
+    status = request(f"{url}/status", args.token)
+    print(format_last_seen(args.controller, status.get(args.controller)))
+
+
+def controller_ping_command():
+    return (
+        'local n = 0 for _ in pairs(dofile("/dom-main/controller/roster.lua").all()) do n = n + 1 end; '
+        'return { pong = true, role = "controller", '
+        'id = dofile("/lib/identity.lua").get(nil), '
+        'computerId = os.getComputerID(), label = os.getComputerLabel(), '
+        'turtleCount = n, uptime = os.clock() }'
+    )
+
+
+def turtle_ping_command():
+    return (
+        'return { pong = true, role = "turtle", '
+        'id = dofile("/lib/identity.lua").get(nil), '
+        'computerId = os.getComputerID(), label = os.getComputerLabel(), '
+        'fuel = turtle.getFuelLevel(), fuelLimit = turtle.getFuelLimit(), '
+        'position = dofile("/lib/nav.lua").getPosition(), '
+        'job = dofile("/lib/job.lua").status(), uptime = os.clock() }'
+    )
+
+
+def controller_to_turtle_ping_command(turtle, print_last_seen=True):
+    turtle_lua = lua_string(turtle)
+    inner = turtle_ping_command()
+    last_seen_prefix = ""
+    if print_last_seen:
+        last_seen_prefix = (
+            'local seen = roster.report()[' + turtle_lua + ']; '
+            'if seen and seen.secondsAgo ~= nil then '
+            'print(' + turtle_lua + ' .. ": last seen " .. tostring(seen.secondsAgo) .. "s ago"); '
+            'else print(' + turtle_lua + ' .. ": last seen unavailable"); end; '
+        )
+    return (
+        'local roster = dofile("/dom-main/controller/roster.lua"); '
+        + last_seen_prefix +
+        'return roster.proxy(' + turtle_lua + ', ' + lua_string(inner) + ')'
+    )
+
+
+def turtle_last_seen_command(turtle):
+    turtle_lua = lua_string(turtle)
+    return (
+        'local seen = dofile("/dom-main/controller/roster.lua").report()[' + turtle_lua + ']; '
+        'if seen and seen.secondsAgo ~= nil then '
+        'return ' + turtle_lua + ' .. ": last seen " .. tostring(seen.secondsAgo) .. "s ago"; '
+        'end; '
+        'return ' + turtle_lua + ' .. ": last seen unavailable"'
+    )
+
+
+def cmd_ping(url, args):
+    print_controller_last_seen(url, args)
+    if args.turtle:
+        command = turtle_last_seen_command(args.turtle)
+        res = request(f"{url}/cmd?id={args.controller}", args.token, "POST", {"command": command})
+        last_seen_timeout = min(args.wait_timeout, 5)
+        r = wait_for_result(url, args.token, args.controller, res["cmd_id"], last_seen_timeout)
+        if r and r.get("ok"):
+            output = (r.get("output") or "").strip()
+            print(output[2:] if output.startswith("= ") else output)
+        elif r:
+            print(f"{args.turtle}: last seen unavailable ({r.get('output')})")
+        else:
+            print(f"{args.turtle}: last seen unavailable (controller did not answer within {last_seen_timeout}s)")
+    description, command = build_shortcut("ping", args)
+    if args.turtle:
+        command = controller_to_turtle_ping_command(args.turtle, print_last_seen=False)
+    res = request(f"{url}/cmd?id={args.controller}", args.token, "POST", {"command": command})
+    print(f"queued {res['cmd_id']} on controller {args.controller}: {description}")
+    if args.no_wait:
+        return
+    print("waiting for pong...")
+    r = wait_for_result(url, args.token, args.controller, res["cmd_id"], args.wait_timeout)
+    if r:
+        print_result(r)
+    else:
+        print(f"(no pong after {args.wait_timeout}s -- it may still be running; "
+              f"check with `results {args.controller}` or `console {args.controller}`)")
 
 
 WORLD_CHUNK_SIZE = 16  # must match dom-main/controller/worldstore.lua's own CHUNK_SIZE
@@ -378,10 +486,10 @@ def facing_lua(facing):
 # TURTLE_SHORTCUTS entries build the command that runs *on the turtle*
 # (proxy_wrap() handles getting it there); CONTROLLER_SHORTCUTS entries
 # build a command that runs on the controller itself and are queued
-# unwrapped. `whoami` is the one OPTIONAL_TURTLE_SHORTCUTS entry -- it
-# builds one or the other Lua string itself, depending on whether ns has
-# a turtle name, since "basic info about this device" means something
-# different on each side (see its own branch below).
+# unwrapped. `whoami` and `ping` are OPTIONAL_TURTLE_SHORTCUTS entries -- they
+# build one Lua string or another depending on whether ns has a turtle
+# name, since controller-vs-turtle targeting needs different Lua on each
+# side (see their own branches below).
 def build_shortcut(cmd, ns):
     if cmd == "goto":
         command = (
@@ -486,6 +594,12 @@ def build_shortcut(cmd, ns):
             )
         return "whoami", command
 
+    if cmd == "ping":
+        turtle_name = getattr(ns, "turtle", None)
+        if turtle_name:
+            return f"ping turtle {turtle_name}", controller_to_turtle_ping_command(turtle_name)
+        return "ping controller", controller_ping_command()
+
     if cmd == "roster":
         return "fleet roster", 'return dofile("/dom-main/controller/roster.lua").report()'
 
@@ -579,10 +693,9 @@ CONTROLLER_SHORTCUTS = {
     "roster", "worldblock", "mode", "version", "addzone", "removezone", "zones",
     "ignore", "unignore", "ignored", "addchest", "removechest", "chests", "gpshost",
 }
-# whoami is the one shortcut where <turtle> is optional -- see its
-# build_shortcut() branch and the unified dispatch below, which proxies
-# to a turtle whenever one was given rather than checking set membership.
-OPTIONAL_TURTLE_SHORTCUTS = {"whoami"}
+# These are the shortcuts where <turtle> is optional -- see their
+# build_shortcut() branches and the unified dispatch below.
+OPTIONAL_TURTLE_SHORTCUTS = {"whoami", "ping"}
 SHORTCUT_NAMES = TURTLE_SHORTCUTS | CONTROLLER_SHORTCUTS | OPTIONAL_TURTLE_SHORTCUTS
 
 
@@ -693,6 +806,9 @@ def build_console_parser():
     wap = sub.add_parser("whoami", add_help=False)
     wap.add_argument("turtle", nargs="?")
 
+    pp = sub.add_parser("ping", add_help=False)
+    pp.add_argument("turtle", nargs="?")
+
     modp = sub.add_parser("mode", add_help=False)
     modp.add_argument("value", nargs="?", choices=["idle", "passive", "aggressive"])
 
@@ -764,6 +880,7 @@ this controller live; turtle-targeting ones still need a <turtle> name):
   roster                                       every turtle this controller currently knows about
   worldblock <x> <y> <z>                       block recorded at that coordinate, or None
   whoami [turtle]                              basic info about the controller, or that turtle if named
+  ping [turtle]                                ping the controller, or that turtle through it
   mode [idle|passive|aggressive]               get or set the autopilot mode (omit to just report it)
   version [N] [--bump]                         get or set the controller's manually-tracked code version
   addzone <minX> <minZ> <maxX> <maxZ> <y> <capacity> [height] [--name NAME]
@@ -914,6 +1031,15 @@ def main():
                           help="Basic info about a device -- the controller if <turtle> is omitted, that turtle if given.")
     wap.add_argument("controller")
     wap.add_argument("turtle", nargs="?", help="Omit to ask the controller about itself.")
+
+    pp = sub.add_parser("ping",
+                         help="Ping a controller, or a turtle through that controller. Prints last-seen first.")
+    pp.add_argument("controller")
+    pp.add_argument("turtle", nargs="?", help="Omit to ping the controller itself.")
+    pp.add_argument("--no-wait", action="store_true",
+                    help="Only queue the ping after printing last-seen checks; do not wait for the pong.")
+    pp.add_argument("--wait-timeout", type=int, default=20,
+                    help="Seconds to wait for the pong (default 20).")
 
     modp = sub.add_parser("mode", parents=[waitp],
                            help="Get or set the controller's autopilot mode (idle/passive/aggressive).")
@@ -1487,7 +1613,7 @@ def main():
                         continue
                     description, inner = build_shortcut(ns.cmd, ns)
                     turtle_name = getattr(ns, "turtle", None)
-                    if turtle_name:
+                    if turtle_name and ns.cmd != "ping":
                         command = proxy_wrap(turtle_name, inner)
                         description = f"{description} (turtle {turtle_name})"
                     else:
@@ -1518,6 +1644,9 @@ def main():
             flush_all()  # don't lose a still-accumulating wrapped line at session end
             sys.stdout.flush()
             send_bookkeeping('dofile("/dom-main/controller/mode.lua").disconnect()', tag="heartbeat")
+
+    elif args.cmd == "ping":
+        cmd_ping(url, args)
 
     elif args.cmd in SHORTCUT_NAMES:
         description, inner = build_shortcut(args.cmd, args)
